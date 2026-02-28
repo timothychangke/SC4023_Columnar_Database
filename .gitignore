@@ -1,0 +1,63 @@
+# Compiled objects and executables
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+column_store
+
+# Build directories
+build/
+dist/
+cmake_build/
+.build/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+*.cbp
+.clion.source.header.filter
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile.user
+compile_commands.json
+
+# Dependencies (if you use package managers)
+vcpkg_installed/
+conan/
+
+# Output files
+ScanResult_*.csv
+*.bin
+*.zone
+*.dict
+
+# Temporary files
+*.tmp
+*.log
+*.out
+
+# OS-specific
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python cache (if you have any Python scripts)
+__pycache__/
+*.pyc
+*.pyo
+
+# Doxygen documentation
+doxygen/
+html/
+latex/
