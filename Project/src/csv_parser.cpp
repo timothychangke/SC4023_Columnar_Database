@@ -5,13 +5,14 @@
  * The data.gov.sg dataset actually has 11 columns now, not 10.
  * They added "remaining_lease" at index 9 recently. We DONT need it for our query.
  *
- * We used to have this stupid bug where it always output "568 valid pairs".
- * Root cause was we hardcoded the index, so resale_price read from col 9 instead of 10.
- * It read the remaining lease (eg "61") as price. 
- * Then ppsm became 61 / 100sqm = 0.61. 
- * Since 0.61 is below the threshold, every single pair looked valid. 
- * * So now we parse the header dynamically to find the correct column index.
+ * So now we parse the header dynamically to find the correct column index.
  * Dont hardcode the column positions anymore la.
+ *
+ * OPTIMISATION: Dictionary Encoding
+ * When db.use_dict_encoding is true, during ingestion we additionally populate
+ * encoded uint16_t columns for Town, Flat_Type, Flat_Model, Street_Name.
+ * Each unique string gets a compact integer ID via DictionaryEncoder.
+ * The original string columns are still populated (needed for final output).
  */
 
 #include "csv_parser.h"
@@ -126,7 +127,6 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
     }
 
     // read header row to figure out column index dynamically.
-    // doing this so if data.gov.sg add more columns next time we dont break again.
     std::string line;
     if (!std::getline(infile, line)) {
         throw std::runtime_error(
@@ -175,6 +175,10 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
               << " town=" << COL_TOWN
               << " area=" << COL_AREA
               << " price=" << COL_PRICE << "\n";
+
+    if (db.use_dict_encoding) {
+        std::cout << "[OPT] Dictionary encoding ENABLED for Town, Flat_Type, Flat_Model, Street_Name.\n";
+    }
 
     // start reading data rows
     std::vector<std::string> fields;
@@ -235,17 +239,34 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
             }
             uint32_t rec_price = static_cast<uint32_t>(raw_price);
 
+            // push numeric columns
             db.col_month_year.push_back(rec_year);
             db.col_month_month.push_back(rec_month);
+            db.col_floor_area.push_back(rec_floor_area);
+            db.col_lease_commence_date.push_back(rec_lease);
+            db.col_resale_price.push_back(rec_price);
+
+            // push string columns 
             db.col_town.push_back(fields[COL_TOWN]);
             db.col_block.push_back(fields[COL_BLOCK]);
             db.col_street_name.push_back(fields[COL_STREET]);
             db.col_flat_type.push_back(fields[COL_FLAT_TYPE]);
             db.col_flat_model.push_back(fields[COL_MODEL]);
             db.col_storey_range.push_back(fields[COL_STOREY]);
-            db.col_floor_area.push_back(rec_floor_area);
-            db.col_lease_commence_date.push_back(rec_lease);
-            db.col_resale_price.push_back(rec_price);
+
+            // OPTIMISATION: Dictionary Encoding 
+            // when enabled, also encode string columns as integer IDs.
+            // this lets the query engine compare ints instead of strings.
+            if (db.use_dict_encoding) {
+                db.col_town_encoded.push_back(
+                    db.dict_town.encode(fields[COL_TOWN]));
+                db.col_flat_type_encoded.push_back(
+                    db.dict_flat_type.encode(fields[COL_FLAT_TYPE]));
+                db.col_flat_model_encoded.push_back(
+                    db.dict_flat_model.encode(fields[COL_MODEL]));
+                db.col_street_name_encoded.push_back(
+                    db.dict_street_name.encode(fields[COL_STREET]));
+            }
 
             ++records_loaded;
 
@@ -264,6 +285,12 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
     std::cout << "  Lines read     : " << (line_number - 1) << " (excl. header)\n";
     std::cout << "  Records loaded : " << records_loaded  << "\n";
     std::cout << "  Records skipped: " << records_skipped << "\n";
+    if (db.use_dict_encoding) {
+        std::cout << "  Dictionary sizes: Town=" << db.dict_town.size()
+                  << " FlatType=" << db.dict_flat_type.size()
+                  << " FlatModel=" << db.dict_flat_model.size()
+                  << " StreetName=" << db.dict_street_name.size() << "\n";
+    }
     std::cout << "---------------------------------------------------\n";
 
     return records_loaded;
