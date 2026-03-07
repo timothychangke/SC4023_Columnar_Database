@@ -7,10 +7,16 @@
  * 4. run all the (x, y) queries and write to csv
  *
  * Usage:
- * ./column_store <MatriculationNumber>
+ * ./column_store <MatriculationNumber> [--dict-encoding]
  * eg ./column_store U1234567A
+ * eg ./column_store U1234567A --dict-encoding
+ *
+ * Optimisation flags:
+ * --dict-encoding   Enable dictionary encoding (A1) for string columns.
+ *                   Replaces string comparisons with int comparisons during queries.
  */
 
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -23,14 +29,29 @@
 int main(int argc, char* argv[]) {
 
     // phase 0: check command line args
-    // if they never pass in matric number, just scold them and exit
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <MatriculationNumber>\n";
+        std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [--dict-encoding]\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
+        std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
         return 1;
     }
     const std::string matric_number = argv[1];
     std::cout << "Matriculation number : " << matric_number << "\n";
+
+    // parse optimisation flags from command line
+    bool enable_dict_encoding = false;
+
+    for (int i = 2; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--dict-encoding") == 0) {
+            enable_dict_encoding = true;
+        }
+        // add more flags here as we implement more optimisations
+    }
+
+    std::cout << "--- Optimisation Flags ---\n";
+    std::cout << "  Dictionary Encoding (A1): "
+              << (enable_dict_encoding ? "ON" : "OFF") << "\n";
+    std::cout << "--------------------------\n";
 
     // phase 1: extract query params from matric number
     uint16_t target_year = 0;
@@ -45,8 +66,6 @@ int main(int argc, char* argv[]) {
 
     const std::vector<std::string> towns = buildTownList(matric_number);
 
-    // print out the derived params just for our own debugging 
-    // so we know immediately if the parser screwed up
     std::cout << "Target year  : " << target_year << "\n";
     std::cout << "Start month  : " << static_cast<int>(start_month) << "\n";
     std::cout << "Target towns : ";
@@ -57,13 +76,12 @@ int main(int argc, char* argv[]) {
     std::cout << "\n";
 
     // phase 2: ingest dataset
-    // 
-    // dump everything into our in-memory column store
     ColumnStore db;
 
+    // toggle optimisations before loading
+    db.use_dict_encoding = enable_dict_encoding;
+
     try {
-        // hardcoded path here. make sure you run the executable from 
-        // the correct working directory or it cannot find the file.
         loadCSV("../data/ResalePricesSingapore.csv", db);
     } catch (const std::runtime_error& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -73,14 +91,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Total records in column store: " << db.size() << "\n";
 
     // phase 3: run all the (x, y) combinations
-    // x is 1 to 8 (duration in months)
-    // y is 80 to 150 (min floor area in sqm)
-    // because we loop x first then y, the results are automatically 
-    // sorted ascending x then ascending y. exactly what the spec wants.
     std::vector<QueryResult> all_results;
-    
-    // reserve vector size early so we dont waste time reallocating memory.
-    // 8 values for x, 71 values for y (80 to 150 inclusive).
     all_results.reserve(8 * 71); 
 
     for (int x = 1; x <= 8; ++x) {
