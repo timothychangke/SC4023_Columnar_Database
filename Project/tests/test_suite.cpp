@@ -176,9 +176,12 @@ static ColumnStore makeSingleRecordDB(
     uint16_t floor_area, uint32_t resale_price,
     const std::string &block = "1",
     const std::string &flat_model = "Improved",
-    uint16_t lease_cd = 1990)
+    uint16_t lease_cd = 1990,
+    bool dict_encoding = false)
 {
   ColumnStore db;
+  db.use_dict_encoding = dict_encoding;
+
   db.col_month_year.push_back(year);
   db.col_month_month.push_back(month);
   db.col_town.push_back(town);
@@ -190,6 +193,14 @@ static ColumnStore makeSingleRecordDB(
   db.col_floor_area.push_back(floor_area);
   db.col_lease_commence_date.push_back(lease_cd);
   db.col_resale_price.push_back(resale_price);
+
+  if (dict_encoding) {
+    db.col_town_encoded.push_back(db.dict_town.encode(town));
+    db.col_flat_type_encoded.push_back(db.dict_flat_type.encode("3 ROOM"));
+    db.col_flat_model_encoded.push_back(db.dict_flat_model.encode(flat_model));
+    db.col_street_name_encoded.push_back(db.dict_street_name.encode("TEST ST"));
+  }
+
   return db;
 }
 
@@ -1243,6 +1254,399 @@ static void testBoundaryConditions(TestRunner &t)
         deriveQueryParams("A0001B", y, m);  // second-last=0->10, last=1->2021
         ASSERT_EQ(m, 10u); });
 }
+// =============================================================================
+// Section 12: DictionaryEncoder – unit tests
+// =============================================================================
+static void testDictionaryEncoder(TestRunner &t)
+{
+  t.section("12. DictionaryEncoder – unit tests");
+
+  t.run("First encode assigns ID 0", []()
+        {
+        DictionaryEncoder enc;
+        ASSERT_EQ(enc.encode("TAMPINES"), 0u); });
+
+  t.run("Same string returns same ID", []()
+        {
+        DictionaryEncoder enc;
+        uint16_t id1 = enc.encode("TAMPINES");
+        uint16_t id2 = enc.encode("TAMPINES");
+        ASSERT_EQ(id1, id2); });
+
+  t.run("Different strings get different IDs", []()
+        {
+        DictionaryEncoder enc;
+        uint16_t id1 = enc.encode("TAMPINES");
+        uint16_t id2 = enc.encode("BEDOK");
+        ASSERT(id1 != id2); });
+
+  t.run("IDs are assigned sequentially (0, 1, 2...)", []()
+        {
+        DictionaryEncoder enc;
+        ASSERT_EQ(enc.encode("TAMPINES"),    0u);
+        ASSERT_EQ(enc.encode("BEDOK"),       1u);
+        ASSERT_EQ(enc.encode("JURONG WEST"), 2u); });
+
+  t.run("decode reverses encode", []()
+        {
+        DictionaryEncoder enc;
+        uint16_t id = enc.encode("PASIR RIS");
+        ASSERT_EQ(enc.decode(id), "PASIR RIS"); });
+
+  t.run("lookup finds existing string", []()
+        {
+        DictionaryEncoder enc;
+        enc.encode("CLEMENTI");
+        uint16_t id;
+        bool found = enc.lookup("CLEMENTI", id);
+        ASSERT(found);
+        ASSERT_EQ(id, 0u); });
+
+  t.run("lookup returns false for missing string", []()
+        {
+        DictionaryEncoder enc;
+        enc.encode("CLEMENTI");
+        uint16_t id;
+        bool found = enc.lookup("YISHUN", id);
+        ASSERT(!found); });
+
+  t.run("size tracks unique entries", []()
+        {
+        DictionaryEncoder enc;
+        enc.encode("A"); enc.encode("B"); enc.encode("A");
+        ASSERT_EQ(enc.size(), 2u); });
+
+  t.run("clear resets encoder completely", []()
+        {
+        DictionaryEncoder enc;
+        enc.encode("TAMPINES");
+        enc.clear();
+        ASSERT_EQ(enc.size(), 0u);
+        // after clear, re-encoding should assign ID 0 again
+        ASSERT_EQ(enc.encode("BEDOK"), 0u); });
+}
+
+// =============================================================================
+// Section 13: Dictionary Encoding – loadCSV populates encoded columns
+// =============================================================================
+static void testDictEncodingLoad(TestRunner &t)
+{
+  t.section("13. Dictionary Encoding (A1) – loadCSV populates encoded columns");
+
+  t.run("Encoded columns populated when flag is ON", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_dict_load_on.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        loadCSV(fname, db);
+        ASSERT_EQ(db.col_town_encoded.size(), 1u);
+        ASSERT_EQ(db.col_flat_type_encoded.size(), 1u);
+        ASSERT_EQ(db.col_flat_model_encoded.size(), 1u);
+        ASSERT_EQ(db.col_street_name_encoded.size(), 1u);
+        std::remove(fname.c_str()); });
+
+  t.run("Encoded columns EMPTY when flag is OFF", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_dict_load_off.csv");
+        ColumnStore db;
+        db.use_dict_encoding = false;
+        loadCSV(fname, db);
+        ASSERT(db.col_town_encoded.empty());
+        ASSERT(db.col_flat_type_encoded.empty());
+        std::remove(fname.c_str()); });
+
+  t.run("String columns still populated when encoding is ON", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_dict_load_strings.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        loadCSV(fname, db);
+        ASSERT_EQ(db.col_town[0], "TAMPINES");
+        ASSERT_EQ(db.col_flat_model[0], "New Generation");
+        std::remove(fname.c_str()); });
+
+  t.run("Dictionary correctly maps town string to encoded ID", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_dict_load_map.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        loadCSV(fname, db);
+        // decode the encoded ID back and check it matches the string column
+        uint16_t enc_id = db.col_town_encoded[0];
+        ASSERT_EQ(db.dict_town.decode(enc_id), "TAMPINES");
+        std::remove(fname.c_str()); });
+
+  t.run("Multiple rows with same town get same encoded ID", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_dict_load_dedup.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        loadCSV(fname, db);
+        ASSERT_EQ(db.col_town_encoded[0], db.col_town_encoded[1]);
+        ASSERT_EQ(db.dict_town.size(), 1u);  // only 1 unique town
+        std::remove(fname.c_str()); });
+
+  t.run("Multiple different towns get different encoded IDs", []()
+        {
+        std::string csv = HEADER_10 +
+            "Jan-15,TAMPINES,5 ROOM,274,TAMPINES ST 22,10 TO 12,105,New Generation,1985,404000\n"
+            "Jan-15,BEDOK,5 ROOM,100,BEDOK NORTH ST 3,01 TO 03,110,Improved,1990,350000\n";
+        auto fname = writeTmpCSV(csv, "test_dict_load_multi.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        loadCSV(fname, db);
+        ASSERT(db.col_town_encoded[0] != db.col_town_encoded[1]);
+        ASSERT_EQ(db.dict_town.size(), 2u);
+        std::remove(fname.c_str()); });
+
+  t.run("Encoded column size matches record count", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10 + ROW_VALID_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_dict_load_count.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        loadCSV(fname, db);
+        ASSERT_EQ(db.col_town_encoded.size(), db.size());
+        ASSERT_EQ(db.col_flat_model_encoded.size(), db.size());
+        std::remove(fname.c_str()); });
+
+  t.run("11-column CSV with encoding still works correctly", []()
+        {
+        std::string csv = HEADER_11 + ROW_VALID_11;
+        auto fname = writeTmpCSV(csv, "test_dict_load_11col.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        loadCSV(fname, db);
+        ASSERT_EQ(db.size(), 1u);
+        ASSERT_EQ(db.col_town_encoded.size(), 1u);
+        ASSERT_EQ(db.col_resale_price[0], 404000u);
+        std::remove(fname.c_str()); });
+}
+
+// =============================================================================
+// Section 14: Dictionary Encoding – runQuery correctness
+// =============================================================================
+static void testDictEncodingQuery(TestRunner &t)
+{
+  t.section("14. Dictionary Encoding (A1) – runQuery uses encoded path");
+
+  std::vector<std::string> towns = {"TAMPINES"};
+
+  t.run("Encoded: matching record returns no_result=false", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000,
+                                     "1", "Improved", 1990, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(!r.no_result); });
+
+  t.run("Encoded: PPSM computed correctly (300000/100 = 3000)", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000,
+                                     "1", "Improved", 1990, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT_NEAR(r.price_per_sqm, 3000.0, 0.001); });
+
+  t.run("Encoded: wrong year -> no_result=true", [&]()
+        {
+        auto db = makeSingleRecordDB(2018, 6, "TAMPINES", 100, 300000,
+                                     "1", "Improved", 1990, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  t.run("Encoded: wrong town -> no_result=true", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "BEDOK", 100, 300000,
+                                     "1", "Improved", 1990, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  t.run("Encoded: area below threshold -> no_result=true", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 79, 300000,
+                                     "1", "Improved", 1990, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  t.run("Encoded: PPSM above 4725 -> no_result=true", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 472600,
+                                     "1", "Improved", 1990, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  t.run("Encoded: month outside window -> no_result=true", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 5, "TAMPINES", 100, 300000,
+                                     "1", "Improved", 1990, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  t.run("Encoded: multiple towns in filter list", []()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "PASIR RIS", 100, 300000,
+                                     "1", "Improved", 1990, true);
+        std::vector<std::string> towns2 = {"TAMPINES", "PASIR RIS"};
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns2, r);
+        ASSERT(!r.no_result);
+        ASSERT_EQ(r.town, "PASIR RIS"); });
+
+  t.run("Encoded: town in filter but not in data -> no_result", []()
+        {
+        // DB has TAMPINES, but we only query for WOODLANDS
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000,
+                                     "1", "Improved", 1990, true);
+        std::vector<std::string> towns2 = {"WOODLANDS"};
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns2, r);
+        ASSERT(r.no_result); });
+
+  t.run("Encoded: selects minimum PPSM among multiple records", []()
+        {
+        ColumnStore db;
+        db.use_dict_encoding = true;
+
+        // Record A: ppsm = 300000/100 = 3000
+        db.col_month_year.push_back(2017); db.col_month_month.push_back(6);
+        db.col_town.push_back("TAMPINES"); db.col_block.push_back("10");
+        db.col_street_name.push_back("ST A"); db.col_flat_type.push_back("4 ROOM");
+        db.col_flat_model.push_back("Improved"); db.col_storey_range.push_back("01 TO 03");
+        db.col_floor_area.push_back(100); db.col_lease_commence_date.push_back(1990);
+        db.col_resale_price.push_back(300000);
+        db.col_town_encoded.push_back(db.dict_town.encode("TAMPINES"));
+        db.col_flat_type_encoded.push_back(db.dict_flat_type.encode("4 ROOM"));
+        db.col_flat_model_encoded.push_back(db.dict_flat_model.encode("Improved"));
+        db.col_street_name_encoded.push_back(db.dict_street_name.encode("ST A"));
+
+        // Record B: ppsm = 260000/100 = 2600 (cheaper, should be selected)
+        db.col_month_year.push_back(2017); db.col_month_month.push_back(6);
+        db.col_town.push_back("TAMPINES"); db.col_block.push_back("20");
+        db.col_street_name.push_back("ST B"); db.col_flat_type.push_back("4 ROOM");
+        db.col_flat_model.push_back("New Generation"); db.col_storey_range.push_back("04 TO 06");
+        db.col_floor_area.push_back(100); db.col_lease_commence_date.push_back(1985);
+        db.col_resale_price.push_back(260000);
+        db.col_town_encoded.push_back(db.dict_town.encode("TAMPINES"));
+        db.col_flat_type_encoded.push_back(db.dict_flat_type.encode("4 ROOM"));
+        db.col_flat_model_encoded.push_back(db.dict_flat_model.encode("New Generation"));
+        db.col_street_name_encoded.push_back(db.dict_street_name.encode("ST B"));
+
+        QueryResult r;
+        std::vector<std::string> towns = {"TAMPINES"};
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(!r.no_result);
+        ASSERT_NEAR(r.price_per_sqm, 2600.0, 0.001);
+        ASSERT_EQ(r.block, "20"); });
+
+  t.run("Encoded: output fields are original strings (not IDs)", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000,
+                                     "99", "Premium", 1992, true);
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT_EQ(r.town, "TAMPINES");
+        ASSERT_EQ(r.flat_model, "Premium");
+        ASSERT_EQ(r.block, "99"); });
+
+  t.run("Encoded: empty database -> no_result=true", []()
+        {
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        std::vector<std::string> towns = {"TAMPINES"};
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+}
+
+// =============================================================================
+// Section 15: Dictionary Encoding – baseline vs encoded parity
+// =============================================================================
+static void testDictEncodingParity(TestRunner &t)
+{
+  t.section("15. Dictionary Encoding (A1) – baseline vs encoded result parity");
+
+  // Build identical CSV with multiple towns, months, areas
+  std::string csv = HEADER_10 +
+                    "Jun-17,TAMPINES,4 ROOM,100,TAMPINES ST 1,07 TO 09,110,Improved,1990,350000\n"
+                    "Jun-17,BEDOK,3 ROOM,200,BEDOK NORTH ST 3,01 TO 03,85,Standard,1985,240000\n"
+                    "Jul-17,TAMPINES,5 ROOM,101,TAMPINES ST 2,10 TO 12,130,New Generation,1988,400000\n"
+                    "Aug-17,PASIR RIS,4 ROOM,50,PASIR RIS DR 6,04 TO 06,100,Improved,1995,280000\n"
+                    "Jun-17,JURONG WEST,3 ROOM,300,JURONG WEST ST 42,01 TO 03,90,Standard,1980,200000\n"
+                    "Sep-17,TAMPINES,4 ROOM,102,TAMPINES ST 3,07 TO 09,95,Improved,1992,310000\n";
+
+  t.run("Parity: identical results for all (x,y) pairs across baseline and encoded", [&]()
+        {
+        auto fname = writeTmpCSV(csv, "test_parity.csv");
+
+        // Load baseline
+        ColumnStore db_base;
+        db_base.use_dict_encoding = false;
+        loadCSV(fname, db_base);
+
+        // Load with dict encoding
+        ColumnStore db_dict;
+        db_dict.use_dict_encoding = true;
+        loadCSV(fname, db_dict);
+
+        std::vector<std::string> towns = {"TAMPINES", "PASIR RIS"};
+
+        // test a range of (x,y) pairs
+        for (int x = 1; x <= 4; ++x) {
+            for (int y = 80; y <= 150; y += 10) {
+                QueryResult r_base, r_dict;
+                runQuery(db_base, x, y, 2017, 6, towns, r_base);
+                runQuery(db_dict, x, y, 2017, 6, towns, r_dict);
+
+                if (r_base.no_result != r_dict.no_result) {
+                    throw std::runtime_error(
+                        "Parity mismatch at x=" + std::to_string(x) +
+                        " y=" + std::to_string(y) +
+                        ": base.no_result=" + std::to_string(r_base.no_result) +
+                        " dict.no_result=" + std::to_string(r_dict.no_result));
+                }
+                if (!r_base.no_result) {
+                    if (std::fabs(r_base.price_per_sqm - r_dict.price_per_sqm) > 0.001) {
+                        throw std::runtime_error(
+                            "PPSM mismatch at x=" + std::to_string(x) +
+                            " y=" + std::to_string(y));
+                    }
+                    if (r_base.town != r_dict.town || r_base.block != r_dict.block) {
+                        throw std::runtime_error(
+                            "Record mismatch at x=" + std::to_string(x) +
+                            " y=" + std::to_string(y));
+                    }
+                }
+            }
+        }
+        std::remove(fname.c_str()); });
+
+  t.run("Parity: loadCSV via file produces correct encoded columns", [&]()
+        {
+        auto fname = writeTmpCSV(csv, "test_parity_load.csv");
+        ColumnStore db;
+        db.use_dict_encoding = true;
+        std::size_t n = loadCSV(fname, db);
+
+        // verify every encoded ID decodes back to the original string
+        for (std::size_t i = 0; i < n; ++i) {
+            ASSERT_EQ(db.dict_town.decode(db.col_town_encoded[i]),
+                      db.col_town[i]);
+            ASSERT_EQ(db.dict_flat_model.decode(db.col_flat_model_encoded[i]),
+                      db.col_flat_model[i]);
+        }
+        std::remove(fname.c_str()); });
+}
 
 // =============================================================================
 // main
@@ -1266,6 +1670,10 @@ int main()
   testWriteResults(t);
   testIntegration(t);
   testBoundaryConditions(t);
+  testDictionaryEncoder(t);
+  testDictEncodingLoad(t);
+  testDictEncodingQuery(t);
+  testDictEncodingParity(t);
 
   t.summary();
   return 0;
