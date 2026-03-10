@@ -7,13 +7,17 @@
  * 4. run all the (x, y) queries and write to csv
  *
  * Usage:
- * ./column_store <MatriculationNumber> [--dict-encoding]
+ * ./column_store <MatriculationNumber> [--dict-encoding] [--reuse]
  * eg ./column_store U1234567A
  * eg ./column_store U1234567A --dict-encoding
+ * eg ./column_store U1234567A --reuse
+ *
  *
  * Optimisation flags:
  * --dict-encoding   Enable dictionary encoding (A1) for string columns.
  *                   Replaces string comparisons with int comparisons during queries.
+ * --reuse           Enables intermediate result reuse (C1 and C2).
+ *                   Prevent rescanning full tables for different (x, y) when possible.
  */
 
 #include <cstring>
@@ -30,9 +34,9 @@ int main(int argc, char* argv[]) {
 
     // phase 0: check command line args
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [--dict-encoding]\n";
+        std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [--dict-encoding] [--reuse]\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
-        std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
+        std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding --reuse\n";
         return 1;
     }
     const std::string matric_number = argv[1];
@@ -40,10 +44,14 @@ int main(int argc, char* argv[]) {
 
     // parse optimisation flags from command line
     bool enable_dict_encoding = false;
+    bool enable_reuse = false;
 
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dict-encoding") == 0) {
             enable_dict_encoding = true;
+        }
+        if (std::strcmp(argv[i], "--reuse") == 0) {
+            enable_reuse = true;
         }
         // add more flags here as we implement more optimisations
     }
@@ -51,6 +59,8 @@ int main(int argc, char* argv[]) {
     std::cout << "--- Optimisation Flags ---\n";
     std::cout << "  Dictionary Encoding (A1): "
               << (enable_dict_encoding ? "ON" : "OFF") << "\n";
+    std::cout << "  Intermediate Result Reuse (C1/C2): "
+              << (enable_reuse ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
 
     // phase 1: extract query params from matric number
@@ -80,6 +90,7 @@ int main(int argc, char* argv[]) {
 
     // toggle optimisations before loading
     db.use_dict_encoding = enable_dict_encoding;
+    db.use_reuse = enable_reuse;
 
     try {
         loadCSV("../data/ResalePricesSingapore.csv", db);
@@ -94,10 +105,18 @@ int main(int argc, char* argv[]) {
     std::vector<QueryResult> all_results;
     all_results.reserve(8 * 71); 
 
+    // if opted for reuse:
+    std::vector<std::vector<MinEntry>> cum_table;
+    if (enable_reuse) {
+        std::cout << "Building intermediate cumulative table for reuse...\n";
+        cum_table = buildCumulativeTable(db, target_year, start_month, towns);
+        std::cout << "Cumulative table built. Running queries using IR reuse...\n";
+    } 
+
     for (int x = 1; x <= 8; ++x) {
         for (int y = 80; y <= 150; ++y) {
             QueryResult result;
-            runQuery(db, x, y, target_year, start_month, towns, result);
+            runQuery(db, x, y, target_year, start_month, towns, result, cum_table);
             all_results.push_back(result);
         }
     }

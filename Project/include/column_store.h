@@ -100,6 +100,12 @@ struct ColumnStore {
     // are built during ingestion. the original string columns are still populated
     // so that output_writer can retrieve the original strings for the final CSV.
     bool use_dict_encoding = false;
+     // Intermediate result reuse flag 
+     // This is set to enable/disable the intermediate result reuse optimisation.
+    // When true, the buildCumulativeTable function is called after ingestion to
+    // precompute the cumulative min ppsm for all (x,y) combinations, and the
+    // runQuery function will read directly from this cumulative table instead of scanning the columns.
+    bool use_reuse = false;
 
     // Month originally "YYYY-MM", split it during ingestion
     // so we dont keep doing expensive string parse during queries.
