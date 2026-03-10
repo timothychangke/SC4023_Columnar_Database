@@ -1,5 +1,11 @@
 /*
  * implementation for the parameter extraction and columnar scan.
+ *
+ * === OPTIMISATION: Dictionary Encoding  ===
+ * When db.use_dict_encoding is true, runQuery converts the town filter list
+ * into encoded integer IDs once, then uses int==int comparison in the hot loop
+ * instead of string==string. This avoids heap-allocated string comparisons
+ * on every row, giving a measurable speedup on the town filter predicate.
  */
 
 #include "query_engine.h"
@@ -43,18 +49,6 @@ std::vector<std::string> buildTownList(const std::string& matric_number) {
 
 void deriveQueryParams(const std::string& matric_number,
                        uint16_t& target_year, uint8_t& start_month) {
-    // project spec:
-    // target year = last digit of matric
-    // start month = second last digit 
-    //
-    // note: we need to find the actual digits. standard NTU matric usually ends 
-    // with a letter (eg U1234567A). so we scan from right to left, skip the 
-    // letters until we hit the 1st and 2nd digits.
-    //
-    // eg "A2345678B"
-    // scan right to left: skip 'B', '8' is last digit, '7' is second last.
-    // result: year maps to 8 (2018), month maps to 7 (July)
-
     int last_digit        = -1;
     int second_last_digit = -1;
     int digits_found      = 0;
@@ -65,7 +59,7 @@ void deriveQueryParams(const std::string& matric_number,
             ++digits_found;
             if (digits_found == 1) last_digit        = c - '0';
             if (digits_found == 2) second_last_digit = c - '0';
-            if (digits_found == 2) break; // got both already, stop loop
+            if (digits_found == 2) break;
         }
     }
 
@@ -107,10 +101,9 @@ void runQuery(const ColumnStore&              db,
 
     result.x         = x;
     result.y         = y;
-    result.no_result = true; // assume fail first until we find a valid one
+    result.no_result = true;
 
     // cap end month at 12 so we dont accidentally query into the next year.
-    // spec says we must remain within the target year.
     const uint8_t end_month = static_cast<uint8_t>(
         std::min(static_cast<int>(start_month) + x - 1, 12));
 
@@ -119,40 +112,90 @@ void runQuery(const ColumnStore&              db,
 
     const std::size_t N = db.size();
 
-    // columnar scan loop
-    // [Image of columnar database query execution]
-    // we apply predicates independently. use early continue to skip bad records fast.
-    // notice we dont instantiate any Row objects here to save memory overhead.
-    for (std::size_t i = 0; i < N; ++i) {
-
-        // filter 1: year match
-        if (db.col_month_year[i] != target_year) continue;
-
-        // filter 2: month in range
-        const uint8_t m = db.col_month_month[i];
-        if (m < start_month || m > end_month) continue;
-
-        // filter 3: town match
-        // list is tiny (max 10) so just linear scan it. dont need bother with index.
-        bool town_match = false;
+    // === OPTIMISATION: Dictionary Encoding path ===
+    // when dict encoding is on, pre-resolve town strings to integer IDs
+    // so the loop compares uint16_t instead of std::string.
+    if (db.use_dict_encoding) {
+        // pre-resolve town names to their encoded IDs.
+        // if a town isn't in the dictionary at all, it means zero records
+        // have that town, so we can skip it.
+        std::vector<uint16_t> town_ids;
+        town_ids.reserve(towns.size());
         for (const auto& t : towns) {
-            if (db.col_town[i] == t) { town_match = true; break; }
+            uint16_t id;
+            if (db.dict_town.lookup(t, id)) {
+                town_ids.push_back(id);
+            }
+            // if lookup fails, that town has no records so skip it silently
         }
-        if (!town_match) continue;
 
-        // filter 4: floor area threshold
-        if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+        // if none of the requested towns exist in the data, no results possible
+        if (town_ids.empty()) return;
 
-        // record survived all filters. calculate price per sqm.
-        // use double to prevent weird integer truncation bugs when comparing close values.
-        const double ppsm =
-            static_cast<double>(db.col_resale_price[i]) /
-            static_cast<double>(db.col_floor_area[i]);
+        // loop with integer comparisons
+        for (std::size_t i = 0; i < N; ++i) {
 
-        if (ppsm < min_ppsm) {
-            min_ppsm = ppsm;
-            best_i   = i;
-            result.no_result = false;
+            // filter 1: year match
+            if (db.col_month_year[i] != target_year) continue;
+
+            // filter 2: month in range
+            const uint8_t m = db.col_month_month[i];
+            if (m < start_month || m > end_month) continue;
+
+            // filter 3: town match (int==int comparison, much faster)
+            bool town_match = false;
+            const uint16_t row_town_id = db.col_town_encoded[i];
+            for (const auto& tid : town_ids) {
+                if (row_town_id == tid) { town_match = true; break; }
+            }
+            if (!town_match) continue;
+
+            // filter 4: floor area threshold
+            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+
+            // record survived all filters. calculate price per sqm.
+            const double ppsm =
+                static_cast<double>(db.col_resale_price[i]) /
+                static_cast<double>(db.col_floor_area[i]);
+
+            if (ppsm < min_ppsm) {
+                min_ppsm = ppsm;
+                best_i   = i;
+                result.no_result = false;
+            }
+        }
+    } else {
+        // === BASELINE path ===
+        // uses original string comparisons, exactly as before.
+        for (std::size_t i = 0; i < N; ++i) {
+
+            // filter 1: year match
+            if (db.col_month_year[i] != target_year) continue;
+
+            // filter 2: month in range
+            const uint8_t m = db.col_month_month[i];
+            if (m < start_month || m > end_month) continue;
+
+            // filter 3: town match
+            bool town_match = false;
+            for (const auto& t : towns) {
+                if (db.col_town[i] == t) { town_match = true; break; }
+            }
+            if (!town_match) continue;
+
+            // filter 4: floor area threshold
+            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+
+            // record survived all filters. calculate price per sqm.
+            const double ppsm =
+                static_cast<double>(db.col_resale_price[i]) /
+                static_cast<double>(db.col_floor_area[i]);
+
+            if (ppsm < min_ppsm) {
+                min_ppsm = ppsm;
+                best_i   = i;
+                result.no_result = false;
+            }
         }
     }
 
@@ -165,6 +208,7 @@ void runQuery(const ColumnStore&              db,
         }
 
         // limit passed. populate the final result from the column vectors.
+        // always use the original string columns for output (never decode).
         result.year                = db.col_month_year[best_i];
         result.month               = db.col_month_month[best_i];
         result.town                = db.col_town[best_i];
