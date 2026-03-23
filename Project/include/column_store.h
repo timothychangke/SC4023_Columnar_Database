@@ -89,6 +89,17 @@ struct DictionaryEncoder {
 };
 
 /*
+ * MinEntry
+ * struct to hold the minimum ppsm and corresponding record index for a given (x,y) 
+ * during the cumulative table building.
+ */
+struct MinEntry { 
+    bool has = false; 
+    double ppsm = 0.0; 
+    std::size_t idx = 0; 
+};
+
+/*
  * ColumnStore
  * main in memory db struct. 
  */
@@ -106,6 +117,7 @@ struct ColumnStore {
     // precompute the cumulative min ppsm for all (x,y) combinations, and the
     // runQuery function will read directly from this cumulative table instead of scanning the columns.
     bool use_reuse = false;
+    std::vector<std::vector<MinEntry>> cum_table; // 2D container matrix to store precomputed cumulative min ppsm for all (x,y) combinations when reuse is enabled. 
 
     // Month originally "YYYY-MM", split it during ingestion
     // so we dont keep doing expensive string parse during queries.

@@ -44,15 +44,6 @@ struct QueryResult {
     bool     no_result           = false; // true if nothing matches or min > 4725
 };
 
-// MinEntry
-// struct to hold the minimum ppsm and corresponding record index for a given (x,y) 
-// during the cumulative table building.
-struct MinEntry { 
-    bool has = false; 
-    double ppsm = 0.0; 
-    std::size_t idx = 0; 
-};
-
 // helpers to get query params
 
 /*
@@ -115,8 +106,7 @@ void runQuery(const ColumnStore&              db,
               uint16_t                        target_year,
               uint8_t                         start_month,
               const std::vector<std::string>& towns,
-              QueryResult&                    result,
-              const std::vector<std::vector<MinEntry>>& cum_table);
+              QueryResult&                    result);
 
 /*
  * buildCumulativeTable

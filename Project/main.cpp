@@ -36,7 +36,9 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [--dict-encoding] [--reuse]\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
-        std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding --reuse\n";
+        std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
+        std::cerr << "Note: Only the first optimisation flag that appears will be used.\n";
+
         return 1;
     }
     const std::string matric_number = argv[1];
@@ -105,18 +107,17 @@ int main(int argc, char* argv[]) {
     std::vector<QueryResult> all_results;
     all_results.reserve(8 * 71); 
 
-    // if opted for reuse:
-    std::vector<std::vector<MinEntry>> cum_table;
-    if (enable_reuse) {
+    // if opted for optimisation 2 (reuse)
+    if (db.use_reuse) {
         std::cout << "Building intermediate cumulative table for reuse...\n";
-        cum_table = buildCumulativeTable(db, target_year, start_month, towns);
+        db.cum_table = buildCumulativeTable(db, target_year, start_month, towns);
         std::cout << "Cumulative table built. Running queries using IR reuse...\n";
     } 
 
     for (int x = 1; x <= 8; ++x) {
         for (int y = 80; y <= 150; ++y) {
             QueryResult result;
-            runQuery(db, x, y, target_year, start_month, towns, result, cum_table);
+            runQuery(db, x, y, target_year, start_month, towns, result);
             all_results.push_back(result);
         }
     }

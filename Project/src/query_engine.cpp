@@ -102,8 +102,7 @@ void runQuery(const ColumnStore&              db,
               uint16_t                        target_year,
               uint8_t                         start_month,
               const std::vector<std::string>& towns,
-              QueryResult&                    result,
-              const std::vector<std::vector<MinEntry>>& cum_table) {
+              QueryResult&                    result) {
 
     result.x         = x;
     result.y         = y;
@@ -121,7 +120,7 @@ void runQuery(const ColumnStore&              db,
     // === OPTIMISATION 1: Intermediate Result Reuse path ===
     if (db.use_reuse) {
         // answer this (x,y) query directly from the pre-built cumulative table
-        const MinEntry &e = cum_table[x][y];
+        const MinEntry &e = db.cum_table[x][y];
 
         if (e.has) {
             best_i = e.idx;
