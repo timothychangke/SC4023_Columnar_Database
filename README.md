@@ -115,6 +115,12 @@ g++ -std=c++17 -Wall -Wextra -Iinclude \
     -o column_store
 ```
 
+To run unit tests:
+
+```bash
+make test
+```
+
 ---
 
 ## Usage
