@@ -119,6 +119,14 @@ To run unit tests:
 
 ```bash
 make test
+# Or
+g++ -std=c++17 -Wall -Wextra -Iinclude \
+        tests/test_suite.cpp \
+        src/column_store.cpp \
+        src/csv_parser.cpp \
+        src/query_engine.cpp \
+        src/output_writer.cpp \
+        -o test_runner
 ```
 
 ---
