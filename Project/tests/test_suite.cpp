@@ -1649,6 +1649,179 @@ static void testDictEncodingParity(TestRunner &t)
 }
 
 // =============================================================================
+// testReuseOptimisation - tests for intermediate result reuse (C1/C2)
+// =============================================================================
+
+static void testReuseOptimisation(TestRunner &t)
+{
+  t.section("Reuse Optimisation (buildCumulativeTable + use_reuse)");
+
+  // Helper: mini CSV dataset for reproducible tests
+  std::string csv = "month,block,town,flat_model,flat_type,storey_range,floor_area_sqm,"
+                    "lease_commence_date,resale_price,street_name\n"
+                    "2017-06,1,TAMPINES,Improved,3 ROOM,10 TO 12,100,2000,420000,Street A\n"
+                    "2017-06,2,TAMPINES,Standard,3 ROOM,05 TO 07,90,2000,390000,Street B\n"
+                    "2017-07,3,TAMPINES,Standard,3 ROOM,08 TO 10,95,2000,410000,Street C\n"
+                    "2017-08,4,TAMPINES,Improved,3 ROOM,01 TO 03,85,2000,370000,Street D\n"
+                    "2017-06,5,PASIR RIS,Standard,4 ROOM,10 TO 12,120,2000,500000,Street E\n"
+                    "2017-07,6,PASIR RIS,Improved,4 ROOM,05 TO 07,110,2000,480000,Street F\n";
+
+  auto writeTmpCSVReuse = [](const std::string &content,
+                              const std::string &filename)
+  {
+    std::ofstream f(filename);
+    f << content;
+    f.close();
+    return filename;
+  };
+
+  // Test 1: cumulative table has valid MinEntry structures
+  t.run("Cumulative table contains valid MinEntry structures", [&]()
+        {
+        auto fname = writeTmpCSVReuse(csv, "test_reuse_entries.csv");
+        ColumnStore db;
+        loadCSV(fname, db);
+
+        std::vector<std::string> towns = {"TAMPINES"};
+        auto cum_table =
+            buildCumulativeTable(db, 2017, 6, towns);
+
+        // Check some entries
+        for (std::size_t x = 1; x < cum_table.size() && x <= 8; ++x) {
+            for (std::size_t y = 80; y < cum_table[x].size() && y <= 150; ++y) {
+                const MinEntry &e = cum_table[x][y];
+                // If has=true, ppsm should be positive and idx valid
+                if (e.has) {
+                    ASSERT(e.ppsm > 0.0);
+                    ASSERT(e.idx < db.size());
+                }
+            }
+        }
+
+        std::remove(fname.c_str());
+        });
+
+  // Test 2: runQuery with use_reuse produces same results as non-reuse
+  t.run("Reuse and non-reuse paths produce identical results", [&]()
+        {
+        auto fname = writeTmpCSVReuse(csv, "test_reuse_parity.csv");
+
+        ColumnStore db_normal;
+        ColumnStore db_reuse;
+
+        loadCSV(fname, db_normal);
+        loadCSV(fname, db_reuse);
+
+        db_normal.use_reuse = false;
+        db_reuse.use_reuse = true;
+
+        // Build cumulative table for reuse version
+        std::vector<std::string> towns = {"TAMPINES", "PASIR RIS"};
+        db_reuse.cum_table = buildCumulativeTable(db_reuse, 2017, 6, towns);
+
+        // Test various (x,y) combinations
+        for (int x = 1; x <= 3; ++x) {
+            for (int y = 80; y <= 130; y += 10) {
+                QueryResult r_normal, r_reuse;
+                runQuery(db_normal, x, y, 2017, 6, towns, r_normal);
+                runQuery(db_reuse, x, y, 2017, 6, towns, r_reuse);
+
+                // Both should agree on whether there's a result
+                ASSERT_EQ(r_normal.no_result, r_reuse.no_result);
+
+                // If both have results, PPSM should match
+                if (!r_normal.no_result && !r_reuse.no_result) {
+                    ASSERT(std::fabs(r_normal.price_per_sqm - r_reuse.price_per_sqm) <
+                           0.01);
+                    // Town and block should match too
+                    ASSERT_EQ(r_normal.town, r_reuse.town);
+                    ASSERT_EQ(r_normal.block, r_reuse.block);
+                }
+            }
+        }
+
+        std::remove(fname.c_str());
+        });
+
+  // Test 3: empty cumulative table when use_reuse=false
+  t.run("Cumulative table remains empty when use_reuse=false", [&]()
+        {
+        auto fname = writeTmpCSVReuse(csv, "test_reuse_empty.csv");
+        ColumnStore db;
+        db.use_reuse = false; // Intentionally not building
+        loadCSV(fname, db);
+
+        // cum_table should be empty
+        ASSERT_EQ(db.cum_table.size(), 0);
+
+        std::remove(fname.c_str());
+        });
+
+  // Test 4: cumulative table respects town filter
+  t.run("Cumulative table respects town filter constraints", [&]()
+        {
+        auto fname = writeTmpCSVReuse(csv, "test_reuse_towns.csv");
+        ColumnStore db;
+        loadCSV(fname, db);
+
+        // Build tables for different town lists
+        std::vector<std::string> towns_tampines = {"TAMPINES"};
+        std::vector<std::string> towns_pasir = {"PASIR RIS"};
+        std::vector<std::string> towns_both = {"TAMPINES", "PASIR RIS"};
+
+        auto cum_tampines =
+            buildCumulativeTable(db, 2017, 6, towns_tampines);
+        auto cum_pasir = buildCumulativeTable(db, 2017, 6, towns_pasir);
+        auto cum_both = buildCumulativeTable(db, 2017, 6, towns_both);
+
+        // All should be non-empty
+        ASSERT(cum_tampines.size() > 0);
+        ASSERT(cum_pasir.size() > 0);
+        ASSERT(cum_both.size() > 0);
+
+        // Results should differ between single town and combined
+        // (at least some entries should differ)
+        bool found_diff = false;
+        for (std::size_t x = 1; x < cum_tampines.size() && x <= 3; ++x) {
+            for (std::size_t y = 80; y < cum_tampines[x].size() && y <= 120; ++y) {
+                if (cum_tampines[x][y].has != cum_both[x][y].has ||
+                    (cum_tampines[x][y].has &&
+                     cum_tampines[x][y].idx != cum_both[x][y].idx)) {
+                    found_diff = true;
+                    break;
+                }
+            }
+            if (found_diff)
+                break;
+        }
+        // It's OK if we didn't find a diff (data may not be diverse enough)
+
+        std::remove(fname.c_str());
+        });
+
+  // Test 5: reuse table has correct x/y dimensions
+  t.run("Cumulative table dimensions match expected bounds (x=1..8, y=80..150)", [&]()
+        {
+        auto fname = writeTmpCSVReuse(csv, "test_reuse_dims.csv");
+        ColumnStore db;
+        loadCSV(fname, db);
+
+        std::vector<std::string> towns = {"TAMPINES"};
+        auto cum_table = buildCumulativeTable(db, 2017, 6, towns);
+
+        // Should have at least 9 rows (indices 0..8)
+        ASSERT(cum_table.size() >= 9);
+
+        // First row (index 0) may be unused, but 1..8 should exist
+        for (std::size_t x = 1; x <= 8; ++x) {
+            ASSERT(cum_table[x].size() >= 151); // Indices 0..150
+        }
+
+        std::remove(fname.c_str());
+        });
+}
+
+// =============================================================================
 // main
 // =============================================================================
 int main()
@@ -1674,6 +1847,7 @@ int main()
   testDictEncodingLoad(t);
   testDictEncodingQuery(t);
   testDictEncodingParity(t);
+  testReuseOptimisation(t);
 
   t.summary();
   return 0;

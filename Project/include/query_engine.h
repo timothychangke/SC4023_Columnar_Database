@@ -107,3 +107,25 @@ void runQuery(const ColumnStore&              db,
               uint8_t                         start_month,
               const std::vector<std::string>& towns,
               QueryResult&                    result);
+
+/*
+ * buildCumulativeTable
+ * Preprocessing step for intermediate result optimisation.
+ * Previously, all rows of the table were scanned for each (x,y) query.
+ * - A x=3 month window contains records from x=2 and x=1.
+ *   Instead of scanning for x=1, x=2, x=3 separately, we scan once and
+ *   label each record with which month offset it belongs to (1..8).
+ * - A y=80 floor area threshold contains records satisfying y=81, y=82, ...
+ *   We group records by their exact area bucket (80..150) once.
+ * Then we build a cumulative table cum_x in two sweeps:
+ * - X sweep (offsets 1->8): cum_x[x][area] = min PPSM over offsets 1..x
+ * - Y sweep (area 149->80): propagate min downward so that
+ *   cum_x[x][y] = min PPSM for any record with month_offset <= x AND floor_area >= y.
+ * Result: O(N) table build, O(1) lookup for any (x,y) pair.
+ */
+std::vector<std::vector<MinEntry>> buildCumulativeTable(
+    const ColumnStore&              db,
+    uint16_t                        target_year,
+    uint8_t                         start_month,
+    const std::vector<std::string>& towns
+);

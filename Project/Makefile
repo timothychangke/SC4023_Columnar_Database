@@ -39,10 +39,7 @@ run: $(TARGET)
 # Build and run unit tests
 test:
 	$(CXX) $(CXXFLAGS) \
-		tests/test_main.cpp \
-		tests/test_column_store.cpp \
-		tests/test_csv_parser.cpp \
-		tests/test_query_engine.cpp \
+		tests/test_suite.cpp \
 		src/column_store.cpp \
 		src/csv_parser.cpp \
 		src/query_engine.cpp \
