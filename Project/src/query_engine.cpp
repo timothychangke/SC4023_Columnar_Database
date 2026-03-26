@@ -252,7 +252,19 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
     std::vector<std::vector<MinEntry>> per_x(9, std::vector<MinEntry>(151));
 
     // Create a set to quickly check if a town is in the filter list
-    std::unordered_set<std::string> town_set(towns.begin(), towns.end());
+    std::unordered_set<std::string> town_set;
+    std::vector<uint16_t> town_ids;
+
+    if (db.use_dict_encoding) {
+        for (const auto& t : towns) {
+            uint16_t id;
+            if (db.dict_town.lookup(t, id)) {
+                town_ids.push_back(id);
+            }
+        }
+    } else {
+        town_set.insert(towns.begin(), towns.end());
+    }
 
     // For each row in the table
     for (std::size_t i = 0; i < N; ++i) {
@@ -267,7 +279,16 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         if (offset < 1 || offset > 8) continue;
 
         // filter 3: town match
-        if (town_set.find(db.col_town[i]) == town_set.end()) continue;
+        if (db.use_dict_encoding) {
+            bool match = false;
+            const uint16_t row_id = db.col_town_encoded[i];
+            for (const auto& tid : town_ids) {
+                if (row_id == tid) { match = true; break; }
+            }
+            if (!match) continue;
+        } else {
+            if (town_set.find(db.col_town[i]) == town_set.end()) continue;
+        }
 
         // filter 4: floor area threshold
         // - Records with area > 150 still satisfy floor_area >= y
