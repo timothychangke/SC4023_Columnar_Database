@@ -1820,6 +1820,130 @@ static void testReuseOptimisation(TestRunner &t)
         std::remove(fname.c_str());
         });
 }
+// =============================================================================
+// Section 12: Sprint 1 Optimisations (A4, C6, C4)
+// =============================================================================
+static void testA4C6C4Optimisations(TestRunner &t)
+{
+  t.section("12. Sprint 1: Pre-computed PPSM (A4), Int Multiply (C6), Predicate Reorder (C4)");
+
+  std::vector<std::string> towns = {"TAMPINES"};
+
+  // --- A4: Pre-computed PPSM ---
+
+  t.run("A4: Pre-computed PPSM gives same result as baseline", [&]()
+        {
+        auto db_base = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        auto db_opt  = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        db_opt.use_precomputed_ppsm = true;
+        // manually populate the pre-computed column
+        db_opt.col_price_per_sqm.push_back(300000.0 / 100.0);
+
+        QueryResult r_base, r_opt;
+        runQuery(db_base, 1, 80, 2017, 6, towns, r_base);
+        runQuery(db_opt,  1, 80, 2017, 6, towns, r_opt);
+        ASSERT_EQ(r_base.no_result, r_opt.no_result);
+        ASSERT_NEAR(r_base.price_per_sqm, r_opt.price_per_sqm, 0.001); });
+
+  t.run("A4: Pre-computed column not populated when flag is OFF", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_a4_off.csv");
+        ColumnStore db;
+        db.use_precomputed_ppsm = false;
+        loadCSV(fname, db);
+        ASSERT(db.col_price_per_sqm.empty());
+        std::remove(fname.c_str()); });
+
+  t.run("A4: Pre-computed column populated when flag is ON", []()
+        {
+        std::string csv = HEADER_10 + ROW_VALID_10;
+        auto fname = writeTmpCSV(csv, "test_a4_on.csv");
+        ColumnStore db;
+        db.use_precomputed_ppsm = true;
+        loadCSV(fname, db);
+        ASSERT_EQ(db.col_price_per_sqm.size(), 1u);
+        // 404000 / 105 ≈ 3847.619
+        ASSERT_NEAR(db.col_price_per_sqm[0], 404000.0 / 105.0, 0.01);
+        std::remove(fname.c_str()); });
+
+  // --- C6: Integer Multiplication Trick ---
+
+  t.run("C6: Record at exactly 4725 threshold still qualifies", [&]()
+        {
+        // price=472500, area=100 -> ppsm=4725.0 exactly
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 472500);
+        db.use_int_multiply = true;
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(!r.no_result);
+        ASSERT_NEAR(r.price_per_sqm, 4725.0, 0.001); });
+
+  t.run("C6: Record above 4725 is excluded", [&]()
+        {
+        // price=472600, area=100 -> ppsm=4726.0
+        auto db = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 472600);
+        db.use_int_multiply = true;
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  t.run("C6: Gives identical results to baseline", [&]()
+        {
+        auto db_base = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        auto db_opt  = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        db_opt.use_int_multiply = true;
+        QueryResult r_base, r_opt;
+        runQuery(db_base, 1, 80, 2017, 6, towns, r_base);
+        runQuery(db_opt,  1, 80, 2017, 6, towns, r_opt);
+        ASSERT_EQ(r_base.no_result, r_opt.no_result);
+        ASSERT_NEAR(r_base.price_per_sqm, r_opt.price_per_sqm, 0.001); });
+
+  // --- C4: Predicate Reorder ---
+
+  t.run("C4: Reordered predicates give same result as baseline", [&]()
+        {
+        auto db_base = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        auto db_opt  = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        db_opt.use_predicate_reorder = true;
+        QueryResult r_base, r_opt;
+        runQuery(db_base, 1, 80, 2017, 6, towns, r_base);
+        runQuery(db_opt,  1, 80, 2017, 6, towns, r_opt);
+        ASSERT_EQ(r_base.no_result, r_opt.no_result);
+        ASSERT_NEAR(r_base.price_per_sqm, r_opt.price_per_sqm, 0.001); });
+
+  t.run("C4: Wrong town still rejected with reorder", [&]()
+        {
+        auto db = makeSingleRecordDB(2017, 6, "BEDOK", 100, 300000);
+        db.use_predicate_reorder = true;
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  t.run("C4: Wrong year still rejected with reorder", [&]()
+        {
+        auto db = makeSingleRecordDB(2018, 6, "TAMPINES", 100, 300000);
+        db.use_predicate_reorder = true;
+        QueryResult r;
+        runQuery(db, 1, 80, 2017, 6, towns, r);
+        ASSERT(r.no_result); });
+
+  // --- All three combined ---
+
+  t.run("A4+C6+C4 combined give same result as baseline", [&]()
+        {
+        auto db_base = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        auto db_opt  = makeSingleRecordDB(2017, 6, "TAMPINES", 100, 300000);
+        db_opt.use_precomputed_ppsm  = true;
+        db_opt.use_int_multiply      = true;
+        db_opt.use_predicate_reorder = true;
+        db_opt.col_price_per_sqm.push_back(300000.0 / 100.0);
+        QueryResult r_base, r_opt;
+        runQuery(db_base, 1, 80, 2017, 6, towns, r_base);
+        runQuery(db_opt,  1, 80, 2017, 6, towns, r_opt);
+        ASSERT_EQ(r_base.no_result, r_opt.no_result);
+        ASSERT_NEAR(r_base.price_per_sqm, r_opt.price_per_sqm, 0.001); });
+}
 
 // =============================================================================
 // main
