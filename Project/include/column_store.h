@@ -111,6 +111,7 @@ struct ColumnStore {
     // are built during ingestion. the original string columns are still populated
     // so that output_writer can retrieve the original strings for the final CSV.
     bool use_dict_encoding = false;
+
      // Intermediate result reuse flag 
      // This is set to enable/disable the intermediate result reuse optimisation.
     // When true, the buildCumulativeTable function is called after ingestion to
@@ -118,6 +119,31 @@ struct ColumnStore {
     // runQuery function will read directly from this cumulative table instead of scanning the columns.
     bool use_reuse = false;
     std::vector<std::vector<MinEntry>> cum_table; // 2D container matrix to store precomputed cumulative min ppsm for all (x,y) combinations when reuse is enabled. 
+
+    // When true, col_price_per_sqm is populated during CSV ingestion.
+    // The query engine reads from this column directly instead of
+    // computing resale_price / floor_area on every row during scanning.
+    bool use_precomputed_ppsm = false;
+
+    // When true, the 4725 threshold check uses:
+    //   price <= 4725 * area  (integer multiply)
+    // instead of:
+    //   price / area <= 4725.0  (floating-point division)
+    // This avoids FP division during the threshold check.
+    // NOTE: The final min-PPSM comparison still uses double to correctly
+    // break ties, but the threshold gate becomes integer-only.
+    bool use_int_multiply = false;
+
+     // When true, the scan loop reorders filters so that Town (most selective,
+    // ~80% elimination) is checked first, before Year and Month.
+    // Baseline order:  Year → Month → Town → Area
+    // Optimised order: Town → Year → Month → Area
+    bool use_predicate_reorder = false;
+
+    // Pre-computed Price Per SqM (only populated when use_precomputed_ppsm=true)
+    // Stored as double to preserve precision for min-comparison.
+    std::vector<double> col_price_per_sqm;
+
 
     // Month originally "YYYY-MM", split it during ingestion
     // so we dont keep doing expensive string parse during queries.
