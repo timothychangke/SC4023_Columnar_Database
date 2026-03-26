@@ -23,4 +23,5 @@ void ColumnStore::clear() {
     col_floor_area.clear();
     col_lease_commence_date.clear();
     col_resale_price.clear();
+    col_price_per_sqm.clear();
 }
