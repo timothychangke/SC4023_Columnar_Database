@@ -106,13 +106,13 @@ Remove-Item -Force -ErrorAction SilentlyContinue main.o, src\column_store.o, src
 To build manually without `make`:
 
 ```bash
-g++ -std=c++17 -Wall -Wextra -Iinclude \
-    main.cpp \
+g++ -std=c++17 -O2 -I include \
     src/column_store.cpp \
     src/csv_parser.cpp \
     src/query_engine.cpp \
     src/output_writer.cpp \
-    -o column_store
+    eval/eval_suite.cpp \
+    -o eval_suite
 ```
 
 To run unit tests:
