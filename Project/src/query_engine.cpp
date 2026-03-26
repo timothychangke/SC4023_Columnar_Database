@@ -1,11 +1,18 @@
 /*
  * implementation for the parameter extraction and columnar scan.
  *
- * === OPTIMISATION: Dictionary Encoding  ===
- * When db.use_dict_encoding is true, runQuery converts the town filter list
- * into encoded integer IDs once, then uses int==int comparison in the hot loop
- * instead of string==string. This avoids heap-allocated string comparisons
- * on every row, giving a measurable speedup on the town filter predicate.
+ * === ARCHITECTURE: Composable Optimisation Flags ===
+ * Instead of separate code paths per optimisation, runQuery uses a SINGLE
+ * scan loop where each flag controls an isolated decision point:
+ *
+ *   use_dict_encoding    (A1) — town comparison uses int==int vs string==string
+ *   use_predicate_reorder(C4) — Town filter moves before Year/Month
+ *   use_int_multiply     (C6) — integer early-exit gate before PPSM calc
+ *   use_precomputed_ppsm (A4) — read pre-computed PPSM vs. divide on the fly
+ *   use_reuse            (C1/C2) — bypasses the scan entirely (O(1) lookup)
+ *
+ * Any combination of flags just works. The reuse path is the only one that
+ * short-circuits with an early return since it skips the scan altogether.
  */
 
 #include "query_engine.h"
@@ -19,10 +26,11 @@
 #include <sstream>
 #include <unordered_set>
 
-// helpers to get query params
+// ============================================================================
+// Helper functions (unchanged)
+// ============================================================================
 
 std::vector<std::string> buildTownList(const std::string& matric_number) {
-    // table 1 from spec: map digit to town
     static const std::string TOWN_MAP[10] = {
         "BEDOK",          // 0
         "BUKIT PANJANG",  // 1
@@ -75,16 +83,8 @@ void deriveQueryParams(const std::string& matric_number,
 
     // map last digit to year (2025 is excluded per spec)
     static const uint16_t YEAR_MAP[10] = {
-        2020, // 0
-        2021, // 1
-        2022, // 2
-        2023, // 3
-        2024, // 4
-        2015, // 5
-        2016, // 6
-        2017, // 7
-        2018, // 8
-        2019  // 9
+        2020, 2021, 2022, 2023, 2024,
+        2015, 2016, 2017, 2018, 2019
     };
     target_year = YEAR_MAP[last_digit];
 
@@ -94,7 +94,9 @@ void deriveQueryParams(const std::string& matric_number,
                       : static_cast<uint8_t>(second_last_digit);
 }
 
-// core query execution
+// ============================================================================
+// Core query execution — unified scan loop
+// ============================================================================
 
 void runQuery(const ColumnStore&              db,
               int                             x,
@@ -108,127 +110,166 @@ void runQuery(const ColumnStore&              db,
     result.y         = y;
     result.no_result = true;
 
-    // cap end month at 12 so we dont accidentally query into the next year.
+    // === REUSE PATH: O(1) table lookup, bypasses scan entirely ===
+    // This is the only path that short-circuits. If the cumulative table
+    // has been built, we just read the answer directly. All other flags
+    // are irrelevant here since there is no scan loop to optimise.
+    if (db.use_reuse && !db.cum_table.empty()) {
+        const MinEntry &e = db.cum_table[x][y];
+
+        if (!e.has) return;
+
+        // populate result from the stored index
+        result.no_result       = false;
+        result.year            = db.col_month_year[e.idx];
+        result.month           = db.col_month_month[e.idx];
+        result.town            = db.col_town[e.idx];
+        result.block           = db.col_block[e.idx];
+        result.floor_area      = db.col_floor_area[e.idx];
+        result.flat_model      = db.col_flat_model[e.idx];
+        result.lease_commence_date = db.col_lease_commence_date[e.idx];
+        result.price_per_sqm   = e.ppsm;
+
+        // still need to enforce the 4725 threshold
+        if (e.ppsm > 4725.0) {
+            result.no_result = true;
+        }
+        return;
+    }
+
+    // === SCAN PATH: single loop, all flags compose inside ===
+
     const uint8_t end_month = static_cast<uint8_t>(
         std::min(static_cast<int>(start_month) + x - 1, 12));
 
     double      min_ppsm = std::numeric_limits<double>::max();
     std::size_t best_i   = 0;
+    const std::size_t N  = db.size();
 
-    const std::size_t N = db.size();
-
-    // === OPTIMISATION 1: Intermediate Result Reuse path ===
-    if (db.use_reuse) {
-        // answer this (x,y) query directly from the pre-built cumulative table
-        const MinEntry &e = db.cum_table[x][y];
-
-        if (e.has) {
-            best_i = e.idx;
-            min_ppsm = e.ppsm;
-            result.no_result = false;
-        }
-        
-    } else if (db.use_dict_encoding) {
-        // === OPTIMISATION 2: Dictionary Encoding path ===
-        // when dict encoding is on, pre-resolve town strings to integer IDs
-        // so the loop compares uint16_t instead of std::string.
-
-        // pre-resolve town names to their encoded IDs.
-        // if a town isn't in the dictionary at all, it means zero records
-        // have that town, so we can skip it.
-        std::vector<uint16_t> town_ids;
+    // --- Pre-resolve town IDs once if dict-encoding is on (A1) ---
+    // Done outside the loop so we pay the lookup cost only once per query,
+    // not once per row.
+    std::vector<uint16_t> town_ids;
+    if (db.use_dict_encoding) {
         town_ids.reserve(towns.size());
         for (const auto& t : towns) {
             uint16_t id;
             if (db.dict_town.lookup(t, id)) {
                 town_ids.push_back(id);
             }
-            // if lookup fails, that town has no records so skip it silently
         }
-
         // if none of the requested towns exist in the data, no results possible
         if (town_ids.empty()) return;
+    }
 
-        // loop with integer comparisons
-        for (std::size_t i = 0; i < N; ++i) {
+    for (std::size_t i = 0; i < N; ++i) {
 
-            // filter 1: year match
+        // ==============================================================
+        // PREDICATE BLOCK
+        // C4 controls the ORDER of predicates.
+        // A1 controls HOW the town predicate is evaluated.
+        // These two flags are orthogonal — every combination works.
+        // ==============================================================
+
+        if (db.use_predicate_reorder) {
+            // --- C4 ON: Town first (eliminates ~80% of rows) ---
+
+            // town match (A1 controls int vs string comparison)
+            if (db.use_dict_encoding) {
+                bool match = false;
+                const uint16_t row_id = db.col_town_encoded[i];
+                for (const auto& tid : town_ids) {
+                    if (row_id == tid) { match = true; break; }
+                }
+                if (!match) continue;
+            } else {
+                bool match = false;
+                for (const auto& t : towns) {
+                    if (db.col_town[i] == t) { match = true; break; }
+                }
+                if (!match) continue;
+            }
+
+            // year match
             if (db.col_month_year[i] != target_year) continue;
 
-            // filter 2: month in range
+            // month in range
             const uint8_t m = db.col_month_month[i];
             if (m < start_month || m > end_month) continue;
 
-            // filter 3: town match (int==int comparison, much faster)
-            bool town_match = false;
-            const uint16_t row_town_id = db.col_town_encoded[i];
-            for (const auto& tid : town_ids) {
-                if (row_town_id == tid) { town_match = true; break; }
-            }
-            if (!town_match) continue;
+        } else {
+            // --- C4 OFF: Baseline order — Year, Month, Town ---
 
-            // filter 4: floor area threshold
-            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
-
-            // record survived all filters. calculate price per sqm.
-            const double ppsm =
-                static_cast<double>(db.col_resale_price[i]) /
-                static_cast<double>(db.col_floor_area[i]);
-
-            if (ppsm < min_ppsm) {
-                min_ppsm = ppsm;
-                best_i   = i;
-                result.no_result = false;
-            }
-        }
-    } else {
-        // === BASELINE path ===
-        // uses original string comparisons, exactly as before.
-        for (std::size_t i = 0; i < N; ++i) {
-
-            // filter 1: year match
+            // year match
             if (db.col_month_year[i] != target_year) continue;
 
-            // filter 2: month in range
+            // month in range
             const uint8_t m = db.col_month_month[i];
             if (m < start_month || m > end_month) continue;
 
-            // filter 3: town match
-            bool town_match = false;
-            for (const auto& t : towns) {
-                if (db.col_town[i] == t) { town_match = true; break; }
+            // town match (A1 controls int vs string comparison)
+            if (db.use_dict_encoding) {
+                bool match = false;
+                const uint16_t row_id = db.col_town_encoded[i];
+                for (const auto& tid : town_ids) {
+                    if (row_id == tid) { match = true; break; }
+                }
+                if (!match) continue;
+            } else {
+                bool match = false;
+                for (const auto& t : towns) {
+                    if (db.col_town[i] == t) { match = true; break; }
+                }
+                if (!match) continue;
             }
-            if (!town_match) continue;
+        }
 
-            // filter 4: floor area threshold
-            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+        // floor area threshold (always last predicate, same position)
+        if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
 
-            // record survived all filters. calculate price per sqm.
-            const double ppsm =
-                static_cast<double>(db.col_resale_price[i]) /
-                static_cast<double>(db.col_floor_area[i]);
+        // ==============================================================
+        // C6: Integer multiplication early-exit gate
+        // Skip records whose price/area would exceed 4725 without
+        // doing floating-point division. This is a cheap integer check
+        // that avoids the more expensive double division below.
+        // price <= 4725 * area  ⟺  price/area <= 4725
+        // uint32 * uint16 fits in uint64 safely.
+        // ==============================================================
+        if (db.use_int_multiply) {
+            if (static_cast<uint64_t>(db.col_resale_price[i]) >
+                4725ULL * static_cast<uint64_t>(db.col_floor_area[i]))
+                continue;
+        }
 
-            if (ppsm < min_ppsm) {
-                min_ppsm = ppsm;
-                best_i   = i;
-                result.no_result = false;
-            }
+        // ==============================================================
+        // A4: Read pre-computed PPSM or compute on the fly
+        // When enabled, the PPSM was already calculated during CSV
+        // ingestion and stored in col_price_per_sqm. Otherwise we
+        // divide here as in the baseline.
+        // ==============================================================
+        const double ppsm = db.use_precomputed_ppsm
+            ? db.col_price_per_sqm[i]
+            : static_cast<double>(db.col_resale_price[i]) /
+              static_cast<double>(db.col_floor_area[i]);
+
+        if (ppsm < min_ppsm) {
+            min_ppsm = ppsm;
+            best_i   = i;
+            result.no_result = false;
         }
     }
 
-    // Return early if no results
-    if (result.no_result) {
-        return;
-    }
+    // === Post-scan validation (shared by all scan configs) ===
 
-    // Return early if min PPSM is too high
+    if (result.no_result) return;
+
     if (min_ppsm > 4725.0) {
         result.no_result = true;
         return;
     }
 
-    // Populate the final result from the column vectors
-    // - Always use the original string columns for output (never decode).
+    // Populate the final result from the column vectors.
+    // Always use the original string columns for output (never decode).
     result.year                = db.col_month_year[best_i];
     result.month               = db.col_month_month[best_i];
     result.town                = db.col_town[best_i];
@@ -239,7 +280,17 @@ void runQuery(const ColumnStore&              db,
     result.price_per_sqm       = min_ppsm;
 }
 
-// Preprocessing step for intermediate result optimisation
+// ============================================================================
+// Preprocessing step for intermediate result reuse (C1 + C2)
+// ============================================================================
+// This function also benefits from A1 (dict encoding) for the town filter.
+// A4 and C6 are not applied here because the cumulative table build needs
+// exact PPSM values for every qualifying record, and the C6 gate would
+// incorrectly discard records whose PPSM exceeds 4725 individually but
+// contribute to a valid cumulative minimum at a different (x,y).
+// Actually — records above 4725 can never produce a valid result, so C6
+// could be used. But the table build is O(N) once, so the gain is negligible.
+
 std::vector<std::vector<MinEntry>> buildCumulativeTable(
                 const ColumnStore&              db,
                 uint16_t                        target_year,
@@ -248,10 +299,10 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
 ) {
     const std::size_t N = db.size();
 
-    // Initialize a 2D table, holding the per-offset (1..8) by area (0..150)
+    // Initialize a 2D table: per-offset (1..8) by area bucket (0..150)
     std::vector<std::vector<MinEntry>> per_x(9, std::vector<MinEntry>(151));
 
-    // Create a set to quickly check if a town is in the filter list
+    // Pre-resolve town filter (supports both dict-encoded and string paths)
     std::unordered_set<std::string> town_set;
     std::vector<uint16_t> town_ids;
 
@@ -266,19 +317,18 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         town_set.insert(towns.begin(), towns.end());
     }
 
-    // For each row in the table
+    // Single scan to populate per_x table
     for (std::size_t i = 0; i < N; ++i) {
         // filter 1: year match
         if (db.col_month_year[i] != target_year) continue;
 
-        // filter 2: month in range
+        // filter 2: month in range — compute offset relative to start_month
         const uint8_t month = db.col_month_month[i];
         if (month < start_month) continue;
-        // compute offset relative to start_month: 1..8
         int offset = static_cast<int>(month) - static_cast<int>(start_month) + 1;
         if (offset < 1 || offset > 8) continue;
 
-        // filter 3: town match
+        // filter 3: town match (A1 controls int vs string)
         if (db.use_dict_encoding) {
             bool match = false;
             const uint16_t row_id = db.col_town_encoded[i];
@@ -290,31 +340,27 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
             if (town_set.find(db.col_town[i]) == town_set.end()) continue;
         }
 
-        // filter 4: floor area threshold
-        // - Records with area > 150 still satisfy floor_area >= y
-        //   for every y in [80,150], so clamp them into bucket 150 rather than
-        //   discarding them.  
-        // - Records with area < 80 can never satisfy any valid
-        //   y threshold, so those are the only ones we truly skip.
+        // filter 4: floor area — clamp to bucket range
         const unsigned area = db.col_floor_area[i];
         if (area < 80) continue;
         const unsigned bucket = (area > 150) ? 150u : area;
 
-        // compute ppsm
-        const double ppsm = static_cast<double>(db.col_resale_price[i]) /
-                            static_cast<double>(db.col_floor_area[i]);
+        // compute ppsm (A4: use pre-computed if available)
+        const double ppsm = db.use_precomputed_ppsm
+            ? db.col_price_per_sqm[i]
+            : static_cast<double>(db.col_resale_price[i]) /
+              static_cast<double>(db.col_floor_area[i]);
 
         // update the per-offset, per-area entry with min
         MinEntry &entry = per_x[offset][bucket];
         if (!entry.has || ppsm < entry.ppsm) {
-            entry.has = true;
+            entry.has  = true;
             entry.ppsm = ppsm;
             entry.idx  = i;
         }
     }
 
-    // Sweep: cum_x[x][area] = min ppsm over offsets 1..x for records with floor_area == area. 
-    // The C2 sweep below turns this into floor_area >= area.
+    // C1 sweep: cum_x[x][area] = min PPSM over offsets 1..x for exact area bucket
     std::vector<std::vector<MinEntry>> cum_x(9, std::vector<MinEntry>(151));
     for (int area = 80; area <= 150; ++area) {
         MinEntry running;
@@ -327,9 +373,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         }
     }
 
-    // Sweep: propagate min from high area down to low area so that
-    //    cum_x[x][y] = min ppsm over offsets 1..x AND floor_area >= y.
-    // We sweep area from 149 down to 80; bucket 150 is already holding its minimum so it is correct
+    // C2 sweep: propagate min from high area down so cum_x[x][y] covers >= y
     for (int off = 1; off <= 8; ++off) {
         for (int area = 149; area >= 80; --area) {
             const MinEntry &hi = cum_x[off][area + 1];
