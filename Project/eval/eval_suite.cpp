@@ -62,21 +62,18 @@ namespace perf {
 struct OptConfig {
     std::string name;           // display name for the table
     bool dict_encoding;         // A1
-    // add more flags here as you implement more optimisations:
-    // bool pre_sort;           // A2
     bool reuse;                 // C1+C2
-    // bool zone_maps;          // B1
-    // bool late_materialise;   // C3
-    // bool precompute_ppsm;    // A4
-    // bool int_multiply_trick; // C6
-    // bool predicate_reorder;  // C4
+    bool precompute_ppsm;       // A4
+    bool int_multiply;          // C6
+    bool predicate_reorder;     // C4
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
-        db.use_dict_encoding = dict_encoding;
-        db.use_reuse = reuse;
-        // db.use_pre_sort = pre_sort;  // future
-        // etc.
+        db.use_dict_encoding     = dict_encoding;
+        db.use_reuse             = reuse;
+        db.use_precomputed_ppsm  = precompute_ppsm;
+        db.use_int_multiply      = int_multiply;
+        db.use_predicate_reorder = predicate_reorder;
     }
 };
 
@@ -115,6 +112,8 @@ static std::size_t estimateMemoryBytes(const ColumnStore& db) {
     bytes += db.col_flat_type_encoded.capacity() * sizeof(uint16_t);
     bytes += db.col_flat_model_encoded.capacity() * sizeof(uint16_t);
     bytes += db.col_street_name_encoded.capacity() * sizeof(uint16_t);
+    // pre-computed PPSM column (A4)
+    bytes += db.col_price_per_sqm.capacity() * sizeof(double);
 
     // dictionary overhead
     auto dictBytes = [](const DictionaryEncoder& d) -> std::size_t {
@@ -159,49 +158,64 @@ static void runQueryInstrumented(
     const uint8_t end_month = static_cast<uint8_t>(
         std::min(static_cast<int>(start_month) + x - 1, 12));
 
-    // simulate the scan to count predicates
-    // (this is a counting pass only — the real work was already done above)
     uint64_t local_rows = 0;
     uint64_t local_town_cmp = 0;
     uint64_t local_passed = 0;
 
+    // pre-resolve town IDs if dict encoding is on
+    std::vector<uint16_t> town_ids;
     if (db.use_dict_encoding) {
-        std::vector<uint16_t> town_ids;
         for (const auto& t : towns) {
             uint16_t id;
             if (db.dict_town.lookup(t, id)) town_ids.push_back(id);
         }
+    }
 
-        for (std::size_t i = 0; i < N; ++i) {
-            ++local_rows;
+    for (std::size_t i = 0; i < N; ++i) {
+        ++local_rows;
+
+        if (db.use_predicate_reorder) {
+            // C4 ON: Town → Year → Month
+            if (db.use_dict_encoding) {
+                bool match = false;
+                for (const auto& tid : town_ids) {
+                    ++local_town_cmp;
+                    if (db.col_town_encoded[i] == tid) { match = true; break; }
+                }
+                if (!match) continue;
+            } else {
+                bool match = false;
+                for (const auto& t : towns) {
+                    ++local_town_cmp;
+                    if (db.col_town[i] == t) { match = true; break; }
+                }
+                if (!match) continue;
+            }
             if (db.col_month_year[i] != target_year) continue;
             if (db.col_month_month[i] < start_month || db.col_month_month[i] > end_month) continue;
-
-            // count town comparisons
-            bool match = false;
-            for (const auto& tid : town_ids) {
-                ++local_town_cmp;
-                if (db.col_town_encoded[i] == tid) { match = true; break; }
-            }
-            if (!match) continue;
-            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
-            ++local_passed;
-        }
-    } else {
-        for (std::size_t i = 0; i < N; ++i) {
-            ++local_rows;
+        } else {
+            // C4 OFF: Year → Month → Town
             if (db.col_month_year[i] != target_year) continue;
             if (db.col_month_month[i] < start_month || db.col_month_month[i] > end_month) continue;
-
-            bool match = false;
-            for (const auto& t : towns) {
-                ++local_town_cmp;
-                if (db.col_town[i] == t) { match = true; break; }
+            if (db.use_dict_encoding) {
+                bool match = false;
+                for (const auto& tid : town_ids) {
+                    ++local_town_cmp;
+                    if (db.col_town_encoded[i] == tid) { match = true; break; }
+                }
+                if (!match) continue;
+            } else {
+                bool match = false;
+                for (const auto& t : towns) {
+                    ++local_town_cmp;
+                    if (db.col_town[i] == t) { match = true; break; }
+                }
+                if (!match) continue;
             }
-            if (!match) continue;
-            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
-            ++local_passed;
         }
+
+        if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+        ++local_passed;
     }
 
     perf::rows_scanned += local_rows;
@@ -436,14 +450,17 @@ int main(int argc, char* argv[]) {
     // compared against the first entry (baseline).
     // =====================================================================
     std::vector<OptConfig> configs = {
-        { "Baseline",                  /*dict_encoding=*/false },
-        { "A1: Dict Encoding",         /*dict_encoding=*/true  },
-        { "C1+C2: Result Reuse",       false, true  },
-        { "A1+C1+C2: Dict+Reuse",      true,  true  },
-        // future examples:
-        // { "A1+A4: Dict+PrecomputePPSM", true,  /*precompute=*/true },
-        // { "A1+A2+B3: Dict+Sort+BinSearch", true, ... },
-        // { "Full Optimised",          true, true, true, true, true, true },
+        //                                    A1     C1/C2  A4     C6     C4
+        { "Baseline",                         false, false, false, false, false },
+        { "A1: Dict Encoding",                true,  false, false, false, false },
+        { "C1+C2: Result Reuse",              false, true,  false, false, false },
+        { "A1+C1+C2: Dict+Reuse",             true,  true,  false, false, false },
+        { "A4: Precompute PPSM",              false, false, true,  false, false },
+        { "C6: Int Multiply",                 false, false, false, true,  false },
+        { "C4: Predicate Reorder",            false, false, false, false, true  },
+        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",        false, false, true,  true,  true  },
+        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",        true,  false, true,  true,  true  },
+        { "A1+A4+C6+C4+C1C2: All",            true,  true,  true,  true,  true  },
     };
 
     // =====================================================================
