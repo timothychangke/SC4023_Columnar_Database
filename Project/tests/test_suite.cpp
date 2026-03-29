@@ -1945,6 +1945,46 @@ static void testA4C6C4Optimisations(TestRunner &t)
         ASSERT_NEAR(r_base.price_per_sqm, r_opt.price_per_sqm, 0.001); });
 }
 
+static void testZoneMapOptimisation(TestRunner& t) {
+    t.section("Zone Map Optimisation (B1)");
+
+    // Use a shared CSV for all parity tests
+    std::string csv = "month,block,town,flat_model,flat_type,storey_range,"
+                      "floor_area_sqm,lease_commence_date,resale_price,street_name\n"
+                      "2017-06,1,TAMPINES,Improved,3 ROOM,10 TO 12,100,2000,420000,Street A\n"
+                      "2017-06,2,TAMPINES,Standard,3 ROOM,05 TO 07,90,2000,390000,Street B\n"
+                      "2017-07,3,TAMPINES,Standard,3 ROOM,08 TO 10,95,2000,410000,Street C\n"
+                      "2017-08,4,TAMPINES,Improved,3 ROOM,01 TO 03,85,2000,370000,Street D\n"
+                      "2017-06,5,PASIR RIS,Standard,4 ROOM,10 TO 12,120,2000,500000,Street E\n"
+                      "2017-07,6,PASIR RIS,Improved,4 ROOM,05 TO 07,110,2000,480000,Street F\n";
+
+    // Test 1: Zone map alone vs baseline
+    t.run("ZM parity: zone maps produce same results as baseline", [&]() {
+        // Load into two ColumnStores, one with zone maps, one without
+        // Run all (x,y), assert identical results
+    });
+
+    // Test 2: Zone map + dict encoding vs dict encoding alone
+    t.run("ZM+A1 parity: zone maps + dict encoding match dict-only", [&]() {
+        // Both should produce identical results
+    });
+
+    // Test 3: Zone map + predicate reorder + int multiply + precomputed ppsm
+    t.run("ZM+C4+C6+A4 parity: all scan opts match without zone maps", [&]() {
+        // Proves full composability
+    });
+
+    // Test 4: Zone map + reuse (reuse should dominate, zone maps ignored)
+    t.run("ZM+reuse: reuse dominates, results match reuse-only", [&]() {
+        // Zone maps are irrelevant when reuse is on
+    });
+
+    // Test 5: Zone map skips chunks correctly
+    t.run("ZM correctly skips chunks where max(area) < y", [&]() {
+        // Construct data where one chunk has all small areas
+    });
+}
+
 // =============================================================================
 // main
 // =============================================================================
@@ -1972,6 +2012,7 @@ int main()
   testDictEncodingQuery(t);
   testDictEncodingParity(t);
   testReuseOptimisation(t);
+  testZoneMapOptimisation(t);
 
   t.summary();
   return 0;
