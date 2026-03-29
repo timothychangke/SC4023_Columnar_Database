@@ -47,15 +47,18 @@ namespace perf {
     uint64_t town_comparisons = 0;  // town predicate comparisons (string or int)
     uint64_t rows_passed      = 0;  // rows that passed all filters
     uint64_t queries_valid    = 0;  // (x,y) pairs with a valid result
+    uint64_t chunks_total     = 0;  // total chunks evaluated 
+    uint64_t chunks_skipped   = 0;  // chunks skipped by zone map pruning 
 
     void reset() {
         rows_scanned = 0;
         town_comparisons = 0;
         rows_passed = 0;
         queries_valid = 0;
+        chunks_total = 0;
+        chunks_skipped = 0;
     }
 }
-
 // =============================================================================
 // Optimisation configuration
 // =============================================================================
@@ -66,6 +69,7 @@ struct OptConfig {
     bool precompute_ppsm;       // A4
     bool int_multiply;          // C6
     bool predicate_reorder;     // C4
+    bool zone_maps;             // B1
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
@@ -74,6 +78,7 @@ struct OptConfig {
         db.use_precomputed_ppsm  = precompute_ppsm;
         db.use_int_multiply      = int_multiply;
         db.use_predicate_reorder = predicate_reorder;
+        db.use_zone_maps = zone_maps;
     }
 };
 
@@ -131,6 +136,15 @@ static std::size_t estimateMemoryBytes(const ColumnStore& db) {
     bytes += dictBytes(db.dict_flat_model);
     bytes += dictBytes(db.dict_street_name);
 
+    // zone map overhead (B1)
+    auto zmBytes = [](const ZoneMap& zm) -> std::size_t {
+        return zm.chunks.capacity() * sizeof(ZoneMapEntry);
+    };
+    bytes += zmBytes(db.zm_floor_area);
+    bytes += zmBytes(db.zm_resale_price);
+    bytes += zmBytes(db.zm_month_year);
+    bytes += zmBytes(db.zm_month_month);
+
     return bytes;
 }
 
@@ -153,11 +167,34 @@ static void runQueryInstrumented(
         return;
     }
 
+    // --- B1: count zone map chunk stats ---
+    if (db.use_zone_maps) {
+        const uint8_t end_month_zm = static_cast<uint8_t>(
+            std::min(static_cast<int>(start_month) + x - 1, 12));
+        const std::size_t num_chunks = db.zm_floor_area.numChunks();
+        const uint32_t ty32 = static_cast<uint32_t>(target_year);
+        const uint32_t sm32 = static_cast<uint32_t>(start_month);
+        const uint32_t em32 = static_cast<uint32_t>(end_month_zm);
+        const uint32_t yt32 = static_cast<uint32_t>(y);
+
+        for (std::size_t c = 0; c < num_chunks; ++c) {
+            ++perf::chunks_total;
+            if (!db.zm_month_year.chunkMayContainEQ(c, ty32) ||
+                db.zm_month_month.chunks[c].max_val < sm32 ||
+                db.zm_month_month.chunks[c].min_val > em32 ||
+                !db.zm_floor_area.chunkMayContainGEQ(c, yt32)) {
+                ++perf::chunks_skipped;
+            }
+        }
+    }
+
     // count rows scanned and town comparisons for this query
     const std::size_t N = db.size();
     const uint8_t end_month = static_cast<uint8_t>(
         std::min(static_cast<int>(start_month) + x - 1, 12));
 
+    // simulate the scan to count predicates
+    // (this is a counting pass only — the real work was already done above)
     uint64_t local_rows = 0;
     uint64_t local_town_cmp = 0;
     uint64_t local_passed = 0;
@@ -236,6 +273,8 @@ struct BenchmarkResult {
     uint64_t    town_comparisons;
     uint64_t    rows_passed;
     uint64_t    queries_valid;
+    uint64_t    chunks_total;        // B1: total chunks evaluated
+    uint64_t    chunks_skipped;      // B1: chunks skipped by zone map pruning
     std::size_t memory_bytes;
     std::size_t dict_town_size;
     std::size_t dict_flat_type_size;
@@ -243,7 +282,6 @@ struct BenchmarkResult {
     std::size_t dict_street_size;
     std::vector<QueryResult> results; // for correctness comparison
 };
-
 static BenchmarkResult runBenchmark(
     const std::string& csv_path,
     const std::string& matric_number,
@@ -326,6 +364,8 @@ static BenchmarkResult runBenchmark(
             bm.town_comparisons = perf::town_comparisons;
             bm.rows_passed      = perf::rows_passed;
             bm.queries_valid    = perf::queries_valid;
+            bm.chunks_total     = perf::chunks_total;
+            bm.chunks_skipped   = perf::chunks_skipped;
         }
     }
 
@@ -450,17 +490,22 @@ int main(int argc, char* argv[]) {
     // compared against the first entry (baseline).
     // =====================================================================
     std::vector<OptConfig> configs = {
-        //                                    A1     C1/C2  A4     C6     C4
-        { "Baseline",                         false, false, false, false, false },
-        { "A1: Dict Encoding",                true,  false, false, false, false },
-        { "C1+C2: Result Reuse",              false, true,  false, false, false },
-        { "A1+C1+C2: Dict+Reuse",             true,  true,  false, false, false },
-        { "A4: Precompute PPSM",              false, false, true,  false, false },
-        { "C6: Int Multiply",                 false, false, false, true,  false },
-        { "C4: Predicate Reorder",            false, false, false, false, true  },
-        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",        false, false, true,  true,  true  },
-        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",        true,  false, true,  true,  true  },
-        { "A1+A4+C6+C4+C1C2: All",            true,  true,  true,  true,  true  },
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1
+        { "Baseline",                                                                            false, false, false, false, false, false},
+        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false},
+        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false},
+        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false},
+        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false},
+        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false},
+        { "C4: Predicate Reorder",                                                               false, false, false, false, true, false },
+        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true, false },
+        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true, false },
+        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true, false },
+        { "B1: Zone Maps",                                                                       false, false, false, false, false, true },
+        { "A1+B1: Dict + ZoneMaps",                                                              true, false, false, false, false, true },
+        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true, true, true, true },
+        //  have no effect, but proves no conflict
+        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true, false, false, false,  true},
     };
 
     // =====================================================================
@@ -563,6 +608,28 @@ int main(int argc, char* argv[]) {
             std::cout << "    Flat_Type:   " << bm.dict_flat_type_size << " unique values\n";
             std::cout << "    Flat_Model:  " << bm.dict_flat_model_size << " unique values\n";
             std::cout << "    Street_Name: " << bm.dict_street_size << " unique values\n";
+        }
+    }
+    // =====================================================================
+    // Zone map stats (if any config uses it)
+    // =====================================================================
+    bool any_zm = false;
+    for (const auto& bm : all_results) {
+        if (bm.chunks_total > 0) { any_zm = true; break; }
+    }
+
+    if (any_zm) {
+        std::cout << "\n========================================\n";
+        std::cout << "  ZONE MAP STATS (B1)\n";
+        std::cout << "========================================\n";
+        for (const auto& bm : all_results) {
+            if (bm.chunks_total == 0) continue;
+            double skip_rate = 100.0 * bm.chunks_skipped / bm.chunks_total;
+            std::cout << "  " << bm.config_name << ":\n";
+            std::cout << "    Chunks total:   " << formatCount(bm.chunks_total) << "\n";
+            std::cout << "    Chunks skipped: " << formatCount(bm.chunks_skipped) << "\n";
+            std::cout << std::fixed << std::setprecision(1);
+            std::cout << "    Skip rate:      " << skip_rate << "%\n";
         }
     }
 
