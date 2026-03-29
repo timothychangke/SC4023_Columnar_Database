@@ -36,6 +36,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <limits>
 
 /*
  * DictionaryEncoder
@@ -97,6 +98,39 @@ struct MinEntry {
     bool has = false; 
     double ppsm = 0.0; 
     std::size_t idx = 0; 
+};
+
+
+// ─── Zone Map structures (B1) ───
+
+static constexpr std::size_t ZONE_CHUNK_SIZE = 1024; // rows per chunk
+
+struct ZoneMapEntry {
+    uint32_t min_val = std::numeric_limits<uint32_t>::max();
+    uint32_t max_val = 0;
+};
+
+struct ZoneMap {
+    std::vector<ZoneMapEntry> chunks;
+
+    // check if a chunk CAN contain values >= threshold
+    // returns false → safe to skip the entire chunk
+    bool chunkMayContainGEQ(std::size_t chunk_idx, uint32_t threshold) const {
+        return chunks[chunk_idx].max_val >= threshold;
+    }
+
+    // check if a chunk CAN contain values <= threshold
+    bool chunkMayContainLEQ(std::size_t chunk_idx, uint32_t threshold) const {
+        return chunks[chunk_idx].min_val <= threshold;
+    }
+
+    // check if a chunk CAN contain values == target
+    bool chunkMayContainEQ(std::size_t chunk_idx, uint32_t target) const {
+        return chunks[chunk_idx].min_val <= target &&
+               chunks[chunk_idx].max_val >= target;
+    }
+
+    std::size_t numChunks() const { return chunks.size(); }
 };
 
 /*
@@ -192,6 +226,20 @@ struct ColumnStore {
     DictionaryEncoder dict_flat_type;
     DictionaryEncoder dict_flat_model;
     DictionaryEncoder dict_street_name;
+
+    // Zone map optimisation flag (B1)
+    // When true, zone maps are built during loadCSV for numeric columns.
+    // runQuery will skip entire chunks whose min/max range
+    // cannot satisfy the query predicates.
+    // Composes with: A1, C4, C6, A4 (all scan-path flags).
+    // Irrelevant when use_reuse is on (scan is bypassed entirely).
+    bool use_zone_maps = false;
+
+    // Zone maps for filterable numeric columns
+    ZoneMap zm_floor_area;       // used for: floor_area >= y
+    ZoneMap zm_resale_price;     // used for: price/sqm <= 4725 (via price <= 4725*area)
+    ZoneMap zm_month_year;       // used for: year == target_year
+    ZoneMap zm_month_month;      // used for: month in [start, end]
 
     // helper methods
     

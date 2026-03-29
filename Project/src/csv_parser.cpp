@@ -304,5 +304,56 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
     }
     std::cout << "---------------------------------------------------\n";
 
+    // === Zone Map Construction (B1) ===
+    if (db.use_zone_maps) {
+        const std::size_t N = db.size();
+        const std::size_t num_chunks = (N + ZONE_CHUNK_SIZE - 1) / ZONE_CHUNK_SIZE;
+
+        // helper lambda to build a zone map from a uint16_t column
+        auto buildZoneMap16 = [&](const std::vector<uint16_t>& col) -> ZoneMap {
+            ZoneMap zm;
+            zm.chunks.resize(num_chunks);
+            for (std::size_t i = 0; i < N; ++i) {
+                std::size_t c = i / ZONE_CHUNK_SIZE;
+                uint32_t val = static_cast<uint32_t>(col[i]);
+                if (val < zm.chunks[c].min_val) zm.chunks[c].min_val = val;
+                if (val > zm.chunks[c].max_val) zm.chunks[c].max_val = val;
+            }
+            return zm;
+        };
+
+        auto buildZoneMap8 = [&](const std::vector<uint8_t>& col) -> ZoneMap {
+            ZoneMap zm;
+            zm.chunks.resize(num_chunks);
+            for (std::size_t i = 0; i < N; ++i) {
+                std::size_t c = i / ZONE_CHUNK_SIZE;
+                uint32_t val = static_cast<uint32_t>(col[i]);
+                if (val < zm.chunks[c].min_val) zm.chunks[c].min_val = val;
+                if (val > zm.chunks[c].max_val) zm.chunks[c].max_val = val;
+            }
+            return zm;
+        };
+
+        auto buildZoneMap32 = [&](const std::vector<uint32_t>& col) -> ZoneMap {
+            ZoneMap zm;
+            zm.chunks.resize(num_chunks);
+            for (std::size_t i = 0; i < N; ++i) {
+                std::size_t c = i / ZONE_CHUNK_SIZE;
+                uint32_t val = col[i];
+                if (val < zm.chunks[c].min_val) zm.chunks[c].min_val = val;
+                if (val > zm.chunks[c].max_val) zm.chunks[c].max_val = val;
+            }
+            return zm;
+        };
+
+        db.zm_floor_area    = buildZoneMap16(db.col_floor_area);
+        db.zm_resale_price  = buildZoneMap32(db.col_resale_price);
+        db.zm_month_year    = buildZoneMap16(db.col_month_year);
+        db.zm_month_month   = buildZoneMap8(db.col_month_month);
+
+        std::cout << "Zone maps built: " << num_chunks
+                  << " chunks of " << ZONE_CHUNK_SIZE << " rows each\n";
+    }
+
     return records_loaded;
 }
