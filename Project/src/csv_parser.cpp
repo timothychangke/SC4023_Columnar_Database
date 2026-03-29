@@ -246,6 +246,13 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
             db.col_lease_commence_date.push_back(rec_lease);
             db.col_resale_price.push_back(rec_price);
 
+            // === A4: Pre-compute Price/SqM if enabled ===
+            if (db.use_precomputed_ppsm) {
+                db.col_price_per_sqm.push_back(
+                    static_cast<double>(rec_price) /
+                    static_cast<double>(rec_floor_area));
+            }
+
             // push string columns 
             db.col_town.push_back(fields[COL_TOWN]);
             db.col_block.push_back(fields[COL_BLOCK]);
@@ -275,6 +282,10 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
                       << e.what() << ". Skipping.\n";
             ++records_skipped;
         }
+    }
+    if (db.use_precomputed_ppsm) {
+        std::cout << "  Pre-computed PPSM column: "
+                  << db.col_price_per_sqm.size() << " values\n";
     }
 
     infile.close();
