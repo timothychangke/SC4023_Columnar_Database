@@ -51,6 +51,7 @@ int main(int argc, char* argv[]) {
     bool enable_precomputed_ppsm   = false;
     bool enable_int_multiply       = false;
     bool enable_predicate_reorder  = false;
+    bool enable_zone_maps = false;
 
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dict-encoding") == 0) {
@@ -68,13 +69,16 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--predicate-reorder") == 0) {
             enable_predicate_reorder = true;
         }
+        if (std::strcmp(argv[i], "--zone-maps") == 0) {
+            enable_zone_maps = true;
+        }
         // add more flags here as we implement more optimisations
     }
 
     std::cout << "--- Optimisation Flags ---\n";
-    std::cout << "  Dictionary Encoding (A1):        "
+    std::cout << "  Dictionary Encoding:        "
               << (enable_dict_encoding ? "ON" : "OFF") << "\n";
-    std::cout << "  Intermediate Result Reuse (C1/C2): "
+    std::cout << "  Intermediate Result Reuse: "
               << (enable_reuse ? "ON" : "OFF") << "\n";
     std::cout << "  Precomputed PPSM:                "
               << (enable_precomputed_ppsm ? "ON" : "OFF") << "\n";
@@ -82,6 +86,8 @@ int main(int argc, char* argv[]) {
               << (enable_int_multiply ? "ON" : "OFF") << "\n";
     std::cout << "  Predicate Reordering:            "
               << (enable_predicate_reorder ? "ON" : "OFF") << "\n";
+    std::cout << "  Zone Maps: "
+          << (enable_zone_maps ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
     
     // phase 1: extract query params from matric number
@@ -115,6 +121,7 @@ int main(int argc, char* argv[]) {
     db.use_precomputed_ppsm  = enable_precomputed_ppsm;
     db.use_int_multiply      = enable_int_multiply;
     db.use_predicate_reorder = enable_predicate_reorder;
+    db.use_zone_maps = enable_zone_maps;
 
     try {
         loadCSV("../data/ResalePricesSingapore.csv", db);
