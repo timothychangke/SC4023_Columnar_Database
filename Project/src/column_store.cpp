@@ -24,4 +24,10 @@ void ColumnStore::clear() {
     col_lease_commence_date.clear();
     col_resale_price.clear();
     col_price_per_sqm.clear();
+    
+    // zone maps
+    zm_floor_area.chunks.clear();
+    zm_resale_price.chunks.clear();
+    zm_month_year.chunks.clear();
+    zm_month_month.chunks.clear();
 }
