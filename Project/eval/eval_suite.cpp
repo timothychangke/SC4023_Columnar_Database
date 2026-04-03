@@ -23,6 +23,7 @@
  */
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -70,6 +71,8 @@ struct OptConfig {
     bool int_multiply;          // C6
     bool predicate_reorder;     // C4
     bool zone_maps;             // B1
+    bool presorted_storage;     // A2
+    bool month_binary_search;   // B3
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
@@ -78,9 +81,51 @@ struct OptConfig {
         db.use_precomputed_ppsm  = precompute_ppsm;
         db.use_int_multiply      = int_multiply;
         db.use_predicate_reorder = predicate_reorder;
-        db.use_zone_maps = zone_maps;
+        db.use_zone_maps         = zone_maps;
+        db.use_presorted_storage = presorted_storage;
+        db.use_month_binary_search = month_binary_search;
     }
 };
+
+namespace {
+inline uint32_t monthKey(uint16_t year, uint8_t month) {
+    return static_cast<uint32_t>(year) * 12u + static_cast<uint32_t>(month - 1u);
+}
+
+inline uint32_t monthKeyAt(const ColumnStore& db, std::size_t idx) {
+    return monthKey(db.col_month_year[idx], db.col_month_month[idx]);
+}
+
+std::size_t lowerBoundMonthKey(const ColumnStore& db,
+                               std::size_t l,
+                               std::size_t r,
+                               uint32_t key) {
+    while (l < r) {
+        const std::size_t mid = l + (r - l) / 2;
+        if (monthKeyAt(db, mid) < key) {
+            l = mid + 1;
+        } else {
+            r = mid;
+        }
+    }
+    return l;
+}
+
+std::size_t upperBoundMonthKey(const ColumnStore& db,
+                               std::size_t l,
+                               std::size_t r,
+                               uint32_t key) {
+    while (l < r) {
+        const std::size_t mid = l + (r - l) / 2;
+        if (monthKeyAt(db, mid) <= key) {
+            l = mid + 1;
+        } else {
+            r = mid;
+        }
+    }
+    return l;
+}
+} // namespace
 
 // =============================================================================
 // Memory estimation
@@ -206,6 +251,50 @@ static void runQueryInstrumented(
             uint16_t id;
             if (db.dict_town.lookup(t, id)) town_ids.push_back(id);
         }
+    }
+
+    // A2+B3 fast path counting model: range scans inside town partitions.
+    if (db.use_presorted_storage && db.use_month_binary_search) {
+        const uint32_t start_key = monthKey(target_year, start_month);
+        const uint32_t end_key   = monthKey(target_year, end_month);
+
+        for (const auto& town : towns) {
+            TownPartition part;
+            bool has_part = false;
+
+            if (db.use_dict_encoding) {
+                uint16_t tid = 0;
+                if (db.dict_town.lookup(town, tid) &&
+                    tid < db.town_partitions_encoded.size() &&
+                    db.town_partitions_encoded[tid].valid) {
+                    part = db.town_partitions_encoded[tid];
+                    has_part = true;
+                }
+            } else {
+                auto it = db.town_partitions.find(town);
+                if (it != db.town_partitions.end() && it->second.valid) {
+                    part = it->second;
+                    has_part = true;
+                }
+            }
+
+            if (!has_part) continue;
+
+            const std::size_t lb = lowerBoundMonthKey(db, part.begin, part.end, start_key);
+            const std::size_t ub = upperBoundMonthKey(db, lb, part.end, end_key);
+
+            for (std::size_t i = lb; i < ub; ++i) {
+                ++local_rows;
+                if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+                ++local_passed;
+            }
+        }
+
+        perf::rows_scanned += local_rows;
+        perf::town_comparisons += local_town_cmp;
+        perf::rows_passed += local_passed;
+        if (!result.no_result) ++perf::queries_valid;
+        return;
     }
 
     for (std::size_t i = 0; i < N; ++i) {
@@ -490,22 +579,27 @@ int main(int argc, char* argv[]) {
     // compared against the first entry (baseline).
     // =====================================================================
     std::vector<OptConfig> configs = {
-        //                                                                                        A1     C1/C2  A4     C6     C4     B1
-        { "Baseline",                                                                            false, false, false, false, false, false},
-        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false},
-        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false},
-        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false},
-        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false},
-        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false},
-        { "C4: Predicate Reorder",                                                               false, false, false, false, true, false },
-        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true, false },
-        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true, false },
-        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true, false },
-        { "B1: Zone Maps",                                                                       false, false, false, false, false, true },
-        { "A1+B1: Dict + ZoneMaps",                                                              true, false, false, false, false, true },
-        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true, true, true, true },
-        //  have no effect, but proves no conflict
-        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true, false, false, false,  true},
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     B3
+        { "Baseline",                                                                            false, false, false, false, false, false, false, false},
+        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false, false, false},
+        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false, false, false},
+        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false, false, false},
+        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false, false, false},
+        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false, false, false},
+        { "C4: Predicate Reorder",                                                               false, false, false, false, true,  false, false, false},
+        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true,  false, false, false},
+        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true,  false, false, false},
+        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true,  false, false, false},
+        { "B1: Zone Maps",                                                                       false, false, false, false, false, true,  false, false},
+        { "A1+B1: Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false},
+        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true,  true,  true,  true,  false, false},
+        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true,  false, false, false, true,  false, false},
+
+        { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false},
+        { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, true },
+        { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  true },
+        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  true },
+        { "A2+B3+A4+C6: Pre-sorted + Month Binary Search + Precompute PPSM + Int Multiply",    false, false, true,  true,  false, false, true,  true },
     };
 
     // =====================================================================

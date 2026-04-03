@@ -28,6 +28,46 @@
 #include <sstream>
 #include <unordered_set>
 
+namespace {
+inline uint32_t monthKey(uint16_t year, uint8_t month) {
+    return static_cast<uint32_t>(year) * 12u + static_cast<uint32_t>(month - 1u);
+}
+
+inline uint32_t monthKeyAt(const ColumnStore& db, std::size_t idx) {
+    return monthKey(db.col_month_year[idx], db.col_month_month[idx]);
+}
+
+std::size_t lowerBoundMonthKey(const ColumnStore& db,
+                               std::size_t l,
+                               std::size_t r,
+                               uint32_t key) {
+    while (l < r) {
+        const std::size_t mid = l + (r - l) / 2;
+        if (monthKeyAt(db, mid) < key) {
+            l = mid + 1;
+        } else {
+            r = mid;
+        }
+    }
+    return l;
+}
+
+std::size_t upperBoundMonthKey(const ColumnStore& db,
+                               std::size_t l,
+                               std::size_t r,
+                               uint32_t key) {
+    while (l < r) {
+        const std::size_t mid = l + (r - l) / 2;
+        if (monthKeyAt(db, mid) <= key) {
+            l = mid + 1;
+        } else {
+            r = mid;
+        }
+    }
+    return l;
+}
+} // namespace
+
 // ============================================================================
 // Helper functions (unchanged)
 // ============================================================================
@@ -141,6 +181,81 @@ void runQuery(const ColumnStore&              db,
         result.lease_commence_date = db.col_lease_commence_date[e.idx];
         result.price_per_sqm   = e.ppsm;
         if (e.ppsm > 4725.0) result.no_result = true;
+        return;
+    }
+
+    // =================================================================
+    // A2 + B3 FAST PATH — town partitions + month binary-search range
+    // Enabled only when BOTH flags are on. This keeps flag behavior
+    // extensible: either flag alone falls back to the normal scan path.
+    // =================================================================
+    if (db.use_presorted_storage && db.use_month_binary_search) {
+        const uint32_t start_key = monthKey(target_year, start_month);
+        const uint32_t end_key   = monthKey(target_year, end_month);
+
+        for (const auto& town : towns) {
+            TownPartition part;
+            bool has_part = false;
+
+            if (db.use_dict_encoding) {
+                uint16_t tid = 0;
+                if (db.dict_town.lookup(town, tid) &&
+                    tid < db.town_partitions_encoded.size() &&
+                    db.town_partitions_encoded[tid].valid) {
+                    part = db.town_partitions_encoded[tid];
+                    has_part = true;
+                }
+            } else {
+                auto it = db.town_partitions.find(town);
+                if (it != db.town_partitions.end() && it->second.valid) {
+                    part = it->second;
+                    has_part = true;
+                }
+            }
+
+            if (!has_part) continue;
+
+            const std::size_t lb = lowerBoundMonthKey(db, part.begin, part.end, start_key);
+            const std::size_t ub = upperBoundMonthKey(db, lb, part.end, end_key);
+
+            for (std::size_t i = lb; i < ub; ++i) {
+                if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+
+                if (db.use_int_multiply) {
+                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
+                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i])) {
+                        continue;
+                    }
+                }
+
+                const double ppsm = db.use_precomputed_ppsm
+                    ? db.col_price_per_sqm[i]
+                    : static_cast<double>(db.col_resale_price[i]) /
+                      static_cast<double>(db.col_floor_area[i]);
+
+                if (ppsm < min_ppsm) {
+                    min_ppsm = ppsm;
+                    best_i   = i;
+                    result.no_result = false;
+                }
+            }
+        }
+
+        if (result.no_result) return;
+
+        if (min_ppsm > 4725.0) {
+            result.no_result = true;
+            return;
+        }
+
+        result.year                = db.col_month_year[best_i];
+        result.month               = db.col_month_month[best_i];
+        result.town                = db.col_town[best_i];
+        result.block               = db.col_block[best_i];
+        result.floor_area          = db.col_floor_area[best_i];
+        result.flat_model          = db.col_flat_model[best_i];
+        result.lease_commence_date = db.col_lease_commence_date[best_i];
+        result.price_per_sqm       = min_ppsm;
         return;
     }
 

@@ -16,6 +16,9 @@
  * Optimisation flags:
  * --dict-encoding   Enable dictionary encoding (A1) for string columns.
  *                   Replaces string comparisons with int comparisons during queries.
+ * --presort-storage Enable pre-sorted storage (A2): sort by Town->Year->Month.
+ * --month-bsearch   Enable month binary search index (B3).
+ *                   Most effective when used with --presort-storage.
  * --reuse           Enables intermediate result reuse (C1 and C2).
  *                   Prevent rescanning full tables for different (x, y) when possible.
  */
@@ -34,11 +37,11 @@ int main(int argc, char* argv[]) {
 
     // phase 0: check command line args
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [--dict-encoding] [--reuse]\n"
-        << " [--precompute-ppsm] [--int-multiply] [--predicate-reorder]\n";
+        std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [flags...]\n"
+        << "Flags: --dict-encoding --presort-storage --month-bsearch --reuse\n"
+        << "       --precompute-ppsm --int-multiply --predicate-reorder --zone-maps\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
         std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
-        std::cerr << "Note: Only the first optimisation flag that appears will be used.\n";
 
         return 1;
     }
@@ -52,6 +55,8 @@ int main(int argc, char* argv[]) {
     bool enable_int_multiply       = false;
     bool enable_predicate_reorder  = false;
     bool enable_zone_maps = false;
+    bool enable_presorted_storage = false;
+    bool enable_month_bsearch = false;
 
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dict-encoding") == 0) {
@@ -72,6 +77,12 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--zone-maps") == 0) {
             enable_zone_maps = true;
         }
+        if (std::strcmp(argv[i], "--presort-storage") == 0) {
+            enable_presorted_storage = true;
+        }
+        if (std::strcmp(argv[i], "--month-bsearch") == 0) {
+            enable_month_bsearch = true;
+        }
         // add more flags here as we implement more optimisations
     }
 
@@ -88,6 +99,10 @@ int main(int argc, char* argv[]) {
               << (enable_predicate_reorder ? "ON" : "OFF") << "\n";
     std::cout << "  Zone Maps: "
           << (enable_zone_maps ? "ON" : "OFF") << "\n";
+        std::cout << "  Pre-sorted Storage (A2):       "
+            << (enable_presorted_storage ? "ON" : "OFF") << "\n";
+        std::cout << "  Month Binary Search (B3):      "
+            << (enable_month_bsearch ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
     
     // phase 1: extract query params from matric number
@@ -122,6 +137,8 @@ int main(int argc, char* argv[]) {
     db.use_int_multiply      = enable_int_multiply;
     db.use_predicate_reorder = enable_predicate_reorder;
     db.use_zone_maps = enable_zone_maps;
+    db.use_presorted_storage = enable_presorted_storage;
+    db.use_month_binary_search = enable_month_bsearch;
 
     try {
         loadCSV("../data/ResalePricesSingapore.csv", db);

@@ -1945,6 +1945,153 @@ static void testA4C6C4Optimisations(TestRunner &t)
         ASSERT_NEAR(r_base.price_per_sqm, r_opt.price_per_sqm, 0.001); });
 }
 
+// =============================================================================
+// Section 16: A2 + B3 (Pre-sorted storage + Month Binary Search)
+// =============================================================================
+static void testA2B3Optimisations(TestRunner& t) {
+      t.section("A2+B3 Optimisation (Pre-sorted Storage + Month Binary Search)");
+
+      const std::string csv =
+            HEADER_10 +
+            "Mar-17,TAMPINES,3 ROOM,301,TAMPINES ST 1,10 TO 12,100,Improved,1990,420000\n"
+            "Jan-17,BEDOK,3 ROOM,101,BEDOK ST 1,10 TO 12,90,Improved,1990,270000\n"
+            "Feb-17,TAMPINES,3 ROOM,302,TAMPINES ST 2,05 TO 07,110,Standard,1992,385000\n"
+            "Jan-17,TAMPINES,3 ROOM,303,TAMPINES ST 3,01 TO 03,95,New Generation,1988,350000\n"
+            "Feb-17,BEDOK,3 ROOM,102,BEDOK ST 2,04 TO 06,92,Standard,1991,300000\n";
+
+      t.run("A2: Town partition metadata exists and month order is non-decreasing in partition", [&]() {
+            auto fname = writeTmpCSV(csv, "test_a2_partition.csv");
+
+            ColumnStore db;
+            db.use_presorted_storage = true;
+            loadCSV(fname, db);
+
+            ASSERT_EQ(db.size(), 5u);
+            ASSERT(db.town_partitions.find("BEDOK") != db.town_partitions.end());
+            ASSERT(db.town_partitions.find("TAMPINES") != db.town_partitions.end());
+
+            const TownPartition bedok = db.town_partitions["BEDOK"];
+            const TownPartition tamp  = db.town_partitions["TAMPINES"];
+            ASSERT(bedok.valid);
+            ASSERT(tamp.valid);
+            ASSERT(bedok.begin < bedok.end);
+            ASSERT(tamp.begin < tamp.end);
+            ASSERT(bedok.end <= tamp.begin); // lexical sort: BEDOK before TAMPINES
+
+            uint32_t prev_key = 0;
+            for (std::size_t i = tamp.begin; i < tamp.end; ++i) {
+                  const uint32_t cur_key = static_cast<uint32_t>(db.col_month_year[i]) * 12u +
+                                                       static_cast<uint32_t>(db.col_month_month[i] - 1u);
+                  if (i > tamp.begin) {
+                        ASSERT(prev_key <= cur_key);
+                  }
+                  prev_key = cur_key;
+                  ASSERT_EQ(db.col_town[i], std::string("TAMPINES"));
+            }
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("B3-only flag (without A2) falls back safely and matches baseline", [&]() {
+            auto fname = writeTmpCSV(csv, "test_b3_only.csv");
+
+            ColumnStore db_base;
+            loadCSV(fname, db_base);
+
+            ColumnStore db_b3_only;
+            db_b3_only.use_month_binary_search = true; // A2 is OFF intentionally
+            loadCSV(fname, db_b3_only);
+
+            std::vector<std::string> towns = {"TAMPINES", "BEDOK"};
+            for (int x = 1; x <= 3; ++x) {
+                  for (int y = 80; y <= 120; y += 10) {
+                        QueryResult r1, r2;
+                        runQuery(db_base, x, y, 2017, 1, towns, r1);
+                        runQuery(db_b3_only, x, y, 2017, 1, towns, r2);
+
+                        ASSERT_EQ(r1.no_result, r2.no_result);
+                        if (!r1.no_result) {
+                              ASSERT_EQ(r1.year, r2.year);
+                              ASSERT_EQ(r1.month, r2.month);
+                              ASSERT_EQ(r1.town, r2.town);
+                              ASSERT_EQ(r1.block, r2.block);
+                              ASSERT_EQ(r1.floor_area, r2.floor_area);
+                              ASSERT_NEAR(r1.price_per_sqm, r2.price_per_sqm, 1e-9);
+                        }
+                  }
+            }
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("A2+B3 parity: binary-search path matches baseline", [&]() {
+            auto fname = writeTmpCSV(csv, "test_a2b3_parity.csv");
+
+            ColumnStore db_base;
+            loadCSV(fname, db_base);
+
+            ColumnStore db_fast;
+            db_fast.use_presorted_storage = true;
+            db_fast.use_month_binary_search = true;
+            loadCSV(fname, db_fast);
+
+            std::vector<std::string> towns = {"TAMPINES", "BEDOK"};
+            for (int x = 1; x <= 3; ++x) {
+                  for (int y = 80; y <= 120; y += 10) {
+                        QueryResult r1, r2;
+                        runQuery(db_base, x, y, 2017, 1, towns, r1);
+                        runQuery(db_fast, x, y, 2017, 1, towns, r2);
+
+                        ASSERT_EQ(r1.no_result, r2.no_result);
+                        if (!r1.no_result) {
+                              ASSERT_EQ(r1.year, r2.year);
+                              ASSERT_EQ(r1.month, r2.month);
+                              ASSERT_EQ(r1.town, r2.town);
+                              ASSERT_EQ(r1.block, r2.block);
+                              ASSERT_EQ(r1.floor_area, r2.floor_area);
+                              ASSERT_NEAR(r1.price_per_sqm, r2.price_per_sqm, 1e-9);
+                        }
+                  }
+            }
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("A1+A2+B3 parity: dict path with binary search matches baseline", [&]() {
+            auto fname = writeTmpCSV(csv, "test_a1a2b3_parity.csv");
+
+            ColumnStore db_base;
+            loadCSV(fname, db_base);
+
+            ColumnStore db_fast;
+            db_fast.use_dict_encoding = true;
+            db_fast.use_presorted_storage = true;
+            db_fast.use_month_binary_search = true;
+            loadCSV(fname, db_fast);
+
+            std::vector<std::string> towns = {"TAMPINES", "BEDOK"};
+            for (int x = 1; x <= 3; ++x) {
+                  for (int y = 80; y <= 120; y += 10) {
+                        QueryResult r1, r2;
+                        runQuery(db_base, x, y, 2017, 1, towns, r1);
+                        runQuery(db_fast, x, y, 2017, 1, towns, r2);
+
+                        ASSERT_EQ(r1.no_result, r2.no_result);
+                        if (!r1.no_result) {
+                              ASSERT_EQ(r1.year, r2.year);
+                              ASSERT_EQ(r1.month, r2.month);
+                              ASSERT_EQ(r1.town, r2.town);
+                              ASSERT_EQ(r1.block, r2.block);
+                              ASSERT_EQ(r1.floor_area, r2.floor_area);
+                              ASSERT_NEAR(r1.price_per_sqm, r2.price_per_sqm, 1e-9);
+                        }
+                  }
+            }
+
+            std::remove(fname.c_str());
+      });
+}
+
 static void testZoneMapOptimisation(TestRunner& t) {
     t.section("Zone Map Optimisation (B1)");
 
@@ -2012,6 +2159,8 @@ int main()
   testDictEncodingQuery(t);
   testDictEncodingParity(t);
   testReuseOptimisation(t);
+      testA4C6C4Optimisations(t);
+      testA2B3Optimisations(t);
   testZoneMapOptimisation(t);
 
   t.summary();
