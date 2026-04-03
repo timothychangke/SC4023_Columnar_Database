@@ -12,6 +12,7 @@
  *      use_predicate_reorder(C4) — predicate order: Town-first vs Year-first
  *      use_int_multiply     (C6) — integer early-exit gate before PPSM calc
  *      use_precomputed_ppsm (A4) — PPSM source: pre-stored vs on-the-fly
+ *      use_late_materialise (C3) — defer price column to Phase 2 survivors loop
  *
  * Any combination of scan-path flags just works. The reuse path is the only
  * one that short-circuits since it bypasses the scan altogether.
@@ -182,6 +183,12 @@ void runQuery(const ColumnStore&              db,
     const uint32_t end_month_32   = static_cast<uint32_t>(end_month);
     const uint32_t y_threshold    = static_cast<uint32_t>(y);
 
+    // --- C3 setup: late materialisation survivor list ---
+    std::vector<size_t> survivors;
+    if (db.use_late_materialise) {
+        survivors.reserve(N / 20);
+    }
+
     // ====================== OUTER LOOP: chunks ======================
     for (std::size_t chunk = 0; chunk < num_chunks; ++chunk) {
 
@@ -262,26 +269,59 @@ void runQuery(const ColumnStore&              db,
             // floor area threshold (same position regardless of C4)
             if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
 
-            // ---- C6: Integer Multiplication Trick ----
-            if (db.use_int_multiply) {
-                if (static_cast<uint64_t>(db.col_resale_price[i]) >
-                    4725ULL * static_cast<uint64_t>(db.col_floor_area[i]))
-                    continue;
-            }
+            // ---- C3: Late Materialisation — defer price access ----
+            if (db.use_late_materialise) {
+                survivors.push_back(i);
+            } else {
+                // ---- C6: Integer Multiplication Trick ----
+                if (db.use_int_multiply) {
+                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
+                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i]))
+                        continue;
+                }
 
-            // ---- A4: Pre-computed PPSM vs. on-the-fly division ----
-            const double ppsm = db.use_precomputed_ppsm
-                ? db.col_price_per_sqm[i]
-                : static_cast<double>(db.col_resale_price[i]) /
-                  static_cast<double>(db.col_floor_area[i]);
+                // ---- A4: Pre-computed PPSM vs. on-the-fly division ----
+                const double ppsm = db.use_precomputed_ppsm
+                    ? db.col_price_per_sqm[i]
+                    : static_cast<double>(db.col_resale_price[i]) /
+                      static_cast<double>(db.col_floor_area[i]);
 
-            if (ppsm < min_ppsm) {
-                min_ppsm = ppsm;
-                best_i   = i;
-                result.no_result = false;
+                if (ppsm < min_ppsm) {
+                    min_ppsm = ppsm;
+                    best_i   = i;
+                    result.no_result = false;
+                }
             }
         } // end inner loop (rows)
     } // end outer loop (chunks)
+
+    // =================================================================
+    // C3 PHASE 2: fetch price column only for survivors
+    // C6 and A4 compose here — they only touch col_resale_price and
+    // col_floor_area, which are exactly the columns being deferred.
+    // =================================================================
+    if (db.use_late_materialise) {
+        for (const size_t idx : survivors) {
+            // C6: integer gate on survivors
+            if (db.use_int_multiply) {
+                if (static_cast<uint64_t>(db.col_resale_price[idx]) >
+                    4725ULL * static_cast<uint64_t>(db.col_floor_area[idx]))
+                    continue;
+            }
+
+            // A4: precomputed vs on-the-fly
+            const double ppsm = db.use_precomputed_ppsm
+                ? db.col_price_per_sqm[idx]
+                : static_cast<double>(db.col_resale_price[idx]) /
+                  static_cast<double>(db.col_floor_area[idx]);
+
+            if (ppsm < min_ppsm) {
+                min_ppsm = ppsm;
+                best_i   = idx;
+                result.no_result = false;
+            }
+        }
+    }
 
     // =================================================================
     // POST-SCAN VALIDATION (unchanged, shared by all scan configs)
