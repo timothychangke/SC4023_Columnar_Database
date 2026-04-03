@@ -234,6 +234,13 @@ struct ColumnStore {
     // Composes with: A1, C4, C6, A4 (all scan-path flags).
     // Irrelevant when use_reuse is on (scan is bypassed entirely).
     bool use_zone_maps = false;
+    
+    // Late materialisation (C3)
+    // When true, the scan loop's filter phase only accesses year, month,
+    // town, and floor_area columns. Resale_price (and col_price_per_sqm)
+    // are deferred to a second pass over surviving row indices only.
+    // Composes with: A1, A4, C4, C6, B1. Irrelevant when use_reuse is on.
+    bool use_late_materialise = false;
 
     // Zone maps for filterable numeric columns
     ZoneMap zm_floor_area;       // used for: floor_area >= y

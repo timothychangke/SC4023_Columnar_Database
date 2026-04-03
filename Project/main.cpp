@@ -35,7 +35,7 @@ int main(int argc, char* argv[]) {
     // phase 0: check command line args
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [--dict-encoding] [--reuse]\n"
-        << " [--precompute-ppsm] [--int-multiply] [--predicate-reorder]\n";
+        << " [--precompute-ppsm] [--int-multiply] [--predicate-reorder] [--late-materialise]\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
         std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
         std::cerr << "Note: Only the first optimisation flag that appears will be used.\n";
@@ -52,6 +52,7 @@ int main(int argc, char* argv[]) {
     bool enable_int_multiply       = false;
     bool enable_predicate_reorder  = false;
     bool enable_zone_maps = false;
+    bool enable_late_materialise = false;
 
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dict-encoding") == 0) {
@@ -72,6 +73,9 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--zone-maps") == 0) {
             enable_zone_maps = true;
         }
+        if (std::strcmp(argv[i], "--late-materialise") == 0) {
+            enable_late_materialise = true;
+        }
         // add more flags here as we implement more optimisations
     }
 
@@ -88,6 +92,8 @@ int main(int argc, char* argv[]) {
               << (enable_predicate_reorder ? "ON" : "OFF") << "\n";
     std::cout << "  Zone Maps: "
           << (enable_zone_maps ? "ON" : "OFF") << "\n";
+    std::cout << "  Late Materialisation:            "
+              << (enable_late_materialise ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
     
     // phase 1: extract query params from matric number
@@ -122,6 +128,7 @@ int main(int argc, char* argv[]) {
     db.use_int_multiply      = enable_int_multiply;
     db.use_predicate_reorder = enable_predicate_reorder;
     db.use_zone_maps = enable_zone_maps;
+    db.use_late_materialise = enable_late_materialise;
 
     try {
         loadCSV("../data/ResalePricesSingapore.csv", db);
