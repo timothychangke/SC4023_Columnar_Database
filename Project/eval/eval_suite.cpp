@@ -70,6 +70,7 @@ struct OptConfig {
     bool int_multiply;          // C6
     bool predicate_reorder;     // C4
     bool zone_maps;             // B1
+    bool late_materialise;      // C3
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
@@ -79,6 +80,7 @@ struct OptConfig {
         db.use_int_multiply      = int_multiply;
         db.use_predicate_reorder = predicate_reorder;
         db.use_zone_maps = zone_maps;
+        db.use_late_materialise = late_materialise;
     }
 };
 
@@ -491,21 +493,26 @@ int main(int argc, char* argv[]) {
     // =====================================================================
     std::vector<OptConfig> configs = {
         //                                                                                        A1     C1/C2  A4     C6     C4     B1
-        { "Baseline",                                                                            false, false, false, false, false, false},
-        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false},
-        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false},
-        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false},
-        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false},
-        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false},
-        { "C4: Predicate Reorder",                                                               false, false, false, false, true, false },
-        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true, false },
-        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true, false },
-        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true, false },
-        { "B1: Zone Maps",                                                                       false, false, false, false, false, true },
-        { "A1+B1: Dict + ZoneMaps",                                                              true, false, false, false, false, true },
-        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true, true, true, true },
+        { "Baseline",                                                                            false, false, false, false, false, false, false},
+        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false, false},
+        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false, false},
+        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false, false},
+        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false, false},
+        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false, false},
+        { "C4: Predicate Reorder",                                                               false, false, false, false, true, false, false},
+        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true, false, false},
+        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true, false, false},
+        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true, false, false},
+        { "B1: Zone Maps",                                                                       false, false, false, false, false, true, false},
+        { "A1+B1: Dict + ZoneMaps",                                                              true, false, false, false, false, true, false},
+        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true, true, true, true, false},
         //  have no effect, but proves no conflict
-        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true, false, false, false,  true},
+        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true, false, false, false,  true, false},
+        { "C3: Late Materialise",                                                                false, false, false, false, false, false, true },
+        { "A1+C3: Dict+LateMat",                                                                 true,  false, false, false, false, false, true },
+        { "A1+C3+C4: Dict+LateMat+PredReorder",                                                  true,  false, false, false, true,  false, true },
+        { "A1+A4+C3+C4+C6: All Scan Opts",                                                       true,  false, true,  true,  true,  false, true },
+        { "A1+A4+C3+C4+C6+B1: All Scan+ZoneMaps",                                                true,  false, true,  true,  true,  true,  true },
     };
 
     // =====================================================================
