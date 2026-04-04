@@ -112,6 +112,7 @@ g++ -std=c++17 -O2 -I include \
     src/query_engine.cpp \
     src/output_writer.cpp \
     eval/eval_suite.cpp \
+    src/column_file_io.cpp \
     -o eval_suite
 ```
 

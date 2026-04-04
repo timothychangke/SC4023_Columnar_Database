@@ -29,6 +29,7 @@
 #include "csv_parser.h"
 #include "output_writer.h"
 #include "query_engine.h"
+#include "column_file_io.h"
 
 int main(int argc, char* argv[]) {
 
@@ -53,6 +54,8 @@ int main(int argc, char* argv[]) {
     bool enable_predicate_reorder  = false;
     bool enable_zone_maps = false;
     bool enable_late_materialise = false;
+    bool enable_columnar_files = false;
+    bool write_columns_mode = false;
 
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dict-encoding") == 0) {
@@ -76,6 +79,12 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--late-materialise") == 0) {
             enable_late_materialise = true;
         }
+        if (std::strcmp(argv[i], "--columnar-files") == 0) {
+            enable_columnar_files = true;
+        }
+        if (std::strcmp(argv[i], "--write-columns") == 0) {
+            write_columns_mode = true;
+        }
         // add more flags here as we implement more optimisations
     }
 
@@ -94,6 +103,8 @@ int main(int argc, char* argv[]) {
           << (enable_zone_maps ? "ON" : "OFF") << "\n";
     std::cout << "  Late Materialisation:            "
               << (enable_late_materialise ? "ON" : "OFF") << "\n";
+    std::cout << "  Columnar Files:              "
+          << (enable_columnar_files ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
     
     // phase 1: extract query params from matric number
@@ -129,9 +140,27 @@ int main(int argc, char* argv[]) {
     db.use_predicate_reorder = enable_predicate_reorder;
     db.use_zone_maps = enable_zone_maps;
     db.use_late_materialise = enable_late_materialise;
+    db.use_columnar_files = enable_columnar_files;
+
+    // One-time conversion mode: parse CSV, write column files, then exit
+    if (write_columns_mode) {
+        try {
+            loadCSV("../data/ResalePricesSingapore.csv", db);
+        } catch (const std::runtime_error& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        writeColumnFiles(db, "data/columns/");
+        std::cout << "Column files written. Now run with --columnar-files.\n";
+        return 0;
+    }
 
     try {
-        loadCSV("../data/ResalePricesSingapore.csv", db);
+        if (db.use_columnar_files) {
+            loadColumnFiles(db.column_dir, db);
+        } else {
+            loadCSV("../data/ResalePricesSingapore.csv", db);
+        }
     } catch (const std::runtime_error& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;

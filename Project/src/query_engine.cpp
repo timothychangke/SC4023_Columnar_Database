@@ -28,6 +28,8 @@
 #include <vector>
 #include <sstream>
 #include <unordered_set>
+#include "column_file_io.h"
+#include <iostream>
 
 // ============================================================================
 // Helper functions (unchanged)
@@ -135,13 +137,25 @@ void runQuery(const ColumnStore&              db,
         result.no_result       = false;
         result.year            = db.col_month_year[e.idx];
         result.month           = db.col_month_month[e.idx];
-        result.town            = db.col_town[e.idx];
-        result.block           = db.col_block[e.idx];
         result.floor_area      = db.col_floor_area[e.idx];
-        result.flat_model      = db.col_flat_model[e.idx];
-        result.lease_commence_date = db.col_lease_commence_date[e.idx];
         result.price_per_sqm   = e.ppsm;
-        if (e.ppsm > 4725.0) result.no_result = true;
+
+        if (e.ppsm > 4725.0) {
+            result.no_result = true;
+            return;
+        }
+
+        if (db.use_columnar_files) {
+            result.town                = loadStringAt(db.column_dir + "/town.col", e.idx);
+            result.block               = loadStringAt(db.column_dir + "/block.col", e.idx);
+            result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", e.idx);
+            result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", e.idx);
+        } else {
+            result.town                = db.col_town[e.idx];
+            result.block               = db.col_block[e.idx];
+            result.flat_model          = db.col_flat_model[e.idx];
+            result.lease_commence_date = db.col_lease_commence_date[e.idx];
+        }
         return;
     }
 
@@ -326,22 +340,29 @@ void runQuery(const ColumnStore&              db,
     // =================================================================
     // POST-SCAN VALIDATION (unchanged, shared by all scan configs)
     // =================================================================
-
     if (result.no_result) return;
-
     if (min_ppsm > 4725.0) {
         result.no_result = true;
         return;
     }
 
-    result.year                = db.col_month_year[best_i];
-    result.month               = db.col_month_month[best_i];
-    result.town                = db.col_town[best_i];
-    result.block               = db.col_block[best_i];
-    result.floor_area          = db.col_floor_area[best_i];
-    result.flat_model          = db.col_flat_model[best_i];
-    result.lease_commence_date = db.col_lease_commence_date[best_i];
-    result.price_per_sqm       = min_ppsm;
+    result.year       = db.col_month_year[best_i];
+    result.month      = db.col_month_month[best_i];
+    result.floor_area = db.col_floor_area[best_i];
+    result.price_per_sqm = min_ppsm;
+
+    if (db.use_columnar_files) {
+        // A9: lazy materialisation — read only the winning row from disk
+        result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
+        result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
+        result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
+        result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
+    } else {
+        result.town                = db.col_town[best_i];
+        result.block               = db.col_block[best_i];
+        result.flat_model          = db.col_flat_model[best_i];
+        result.lease_commence_date = db.col_lease_commence_date[best_i];
+    }
 }
 
 // ============================================================================

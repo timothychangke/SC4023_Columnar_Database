@@ -242,6 +242,18 @@ struct ColumnStore {
     // Composes with: A1, A4, C4, C6, B1. Irrelevant when use_reuse is on.
     bool use_late_materialise = false;
 
+    // ── A9: Separate Binary Column Files ──
+    // When true, data is read from pre-written per-column binary files
+    // instead of parsing the CSV at runtime. Only filter columns loaded upfront;
+    // materialisation columns loaded lazily for the winning row only.
+    bool use_columnar_files = false;
+
+    // Path to the directory containing .col files
+    std::string column_dir = "data/columns";
+
+    // Row count (read from meta.col, used to pre-size vectors)
+    std::size_t total_rows = 0;
+
     // Zone maps for filterable numeric columns
     ZoneMap zm_floor_area;       // used for: floor_area >= y
     ZoneMap zm_resale_price;     // used for: price/sqm <= 4725 (via price <= 4725*area)

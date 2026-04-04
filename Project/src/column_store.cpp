@@ -30,4 +30,7 @@ void ColumnStore::clear() {
     zm_resale_price.chunks.clear();
     zm_month_year.chunks.clear();
     zm_month_month.chunks.clear();
+    
+    column_dir = "data/columns/";
+    total_rows = 0;
 }
