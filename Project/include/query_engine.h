@@ -42,6 +42,11 @@ struct QueryResult {
     uint16_t lease_commence_date = 0;
     double   price_per_sqm       = 0.0; // Resale_Price / Floor_Area
     bool     no_result           = false; // true if nothing matches or min > 4725
+    // D1: global row index of the winning row within the *chunk* being
+    // scanned. Populated by runQuery and read by runAllQueriesChunked to
+    // translate chunk-local winners back to global row indices.
+    // Unused (and zero) on all non-D1 paths.
+    std::size_t local_idx = 0;
 };
 
 // helpers to get query params
@@ -129,3 +134,24 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
     uint8_t                         start_month,
     const std::vector<std::string>& towns
 );
+
+/*
+ * runAllQueriesChunked
+ * D1 batch runner: scans the table one I/O chunk at a time and folds
+ * the per-chunk best PPSM into a running global minimum for every (x,y)
+ * pair in [1..8] x [80..150]. This reverses the normal loop nesting
+ * (chunks outer, queries inner) so each chunk is read from disk exactly
+ * once per full benchmark run instead of once per query.
+ *
+ * Populates `results` with 568 QueryResult entries in the same layout
+ * the eval suite expects: index (x-1)*71 + (y-80).
+ *
+ * Requires: base_db.use_columnar_files && base_db.use_dict_encoding.
+ * The chunk size is read from base_db.io_chunk_rows (caller is expected
+ * to have called computeIOChunkRows first, or the apply() helper does it).
+ */
+void runAllQueriesChunked(const ColumnStore&              base_db,
+                          uint16_t                        target_year,
+                          uint8_t                         start_month,
+                          const std::vector<std::string>& towns,
+                          std::vector<QueryResult>&       results);

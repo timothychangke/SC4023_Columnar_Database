@@ -303,6 +303,7 @@ void runQuery(const ColumnStore&              db,
                 if (ppsm < min_ppsm) {
                     min_ppsm = ppsm;
                     best_i   = i;
+                    result.local_idx = i; 
                     result.no_result = false;
                 }
             }
@@ -332,6 +333,7 @@ void runQuery(const ColumnStore&              db,
             if (ppsm < min_ppsm) {
                 min_ppsm = ppsm;
                 best_i   = idx;
+                result.local_idx = idx; 
                 result.no_result = false;
             }
         }
@@ -470,4 +472,169 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
     }
 
     return cum_x;
+}
+
+// ============================================================================
+// D1: Chunked I/O batch runner
+// ============================================================================
+//
+// Reverses the normal loop nesting: instead of
+//   for each (x,y): for each chunk: scan
+// we do
+//   for each chunk: for each (x,y): scan that chunk and fold min
+//
+// This ensures each chunk is read from disk exactly ONCE per benchmark run,
+// not 568 times. Correctness relies on min being associative: the global
+// minimum is the minimum of the per-chunk minima.
+//
+// Requires: use_columnar_files && use_dict_encoding.
+// Incompatible with: use_reuse (caller must guard).
+// ============================================================================
+
+void runAllQueriesChunked(const ColumnStore&              base_db,
+                          uint16_t                        target_year,
+                          uint8_t                         start_month,
+                          const std::vector<std::string>& towns,
+                          std::vector<QueryResult>&       results) {
+
+    const std::size_t N          = base_db.total_rows;
+    const std::size_t chunk_rows = base_db.io_chunk_rows;
+
+    // 568 slots: (x in [1..8]) * (y in [80..150]) = 8 * 71
+    constexpr std::size_t NSLOTS = 8 * 71;
+    results.assign(NSLOTS, QueryResult{});
+    for (int x = 1; x <= 8; ++x) {
+        for (int y = 80; y <= 150; ++y) {
+            const std::size_t slot = (x - 1) * 71 + (y - 80);
+            results[slot].x         = x;
+            results[slot].y         = y;
+            results[slot].no_result = true;
+        }
+    }
+
+    std::vector<double>      min_ppsm(NSLOTS, std::numeric_limits<double>::max());
+    std::vector<std::size_t> best_global_idx(NSLOTS, 0);
+
+    // Reset observability counters
+    base_db.io_chunks_loaded = 0;
+    base_db.io_bytes_read    = 0;
+
+    // ============================= OUTER LOOP: chunks =======================
+    for (std::size_t chunk_start = 0; chunk_start < N; chunk_start += chunk_rows) {
+        const std::size_t this_chunk_rows = std::min(chunk_rows, N - chunk_start);
+
+        // Build a partial ColumnStore holding only this chunk's filter columns.
+        ColumnStore part;
+        part.use_dict_encoding     = base_db.use_dict_encoding;
+        part.use_precomputed_ppsm  = base_db.use_precomputed_ppsm;
+        part.use_int_multiply      = base_db.use_int_multiply;
+        part.use_predicate_reorder = base_db.use_predicate_reorder;
+        part.use_late_materialise  = base_db.use_late_materialise;
+        part.use_zone_maps         = base_db.use_zone_maps;
+        part.use_columnar_files    = true;
+        part.column_dir            = base_db.column_dir;
+
+        // Dictionaries must be shared so encoded town IDs resolve correctly
+        // across chunks. Copy by value — cheap (~26 towns, ~20 flat models).
+        part.dict_town        = base_db.dict_town;
+        part.dict_flat_type   = base_db.dict_flat_type;
+        part.dict_flat_model  = base_db.dict_flat_model;
+        part.dict_street_name = base_db.dict_street_name;
+
+        // Propagate byte counter up to base_db for reporting.
+        const std::size_t before_bytes = base_db.io_bytes_read;
+        loadColumnFilesChunk(base_db.column_dir, chunk_start, this_chunk_rows, part);
+
+        // loadColumnFilesChunk writes into part.io_bytes_read; lift it up.
+        base_db.io_bytes_read = before_bytes + part.io_bytes_read;
+        base_db.io_chunks_loaded++;
+
+        // B1: rebuild zone maps for this chunk (cheap: O(this_chunk_rows)).
+        if (base_db.use_zone_maps) {
+            const std::size_t nc =
+                (this_chunk_rows + ZONE_CHUNK_SIZE - 1) / ZONE_CHUNK_SIZE;
+
+            auto buildZM16 = [&](const std::vector<uint16_t>& col) -> ZoneMap {
+                ZoneMap zm;
+                zm.chunks.resize(nc);
+                for (std::size_t i = 0; i < col.size(); ++i) {
+                    std::size_t c = i / ZONE_CHUNK_SIZE;
+                    uint32_t v = static_cast<uint32_t>(col[i]);
+                    if (v < zm.chunks[c].min_val) zm.chunks[c].min_val = v;
+                    if (v > zm.chunks[c].max_val) zm.chunks[c].max_val = v;
+                }
+                return zm;
+            };
+            auto buildZM8 = [&](const std::vector<uint8_t>& col) -> ZoneMap {
+                ZoneMap zm;
+                zm.chunks.resize(nc);
+                for (std::size_t i = 0; i < col.size(); ++i) {
+                    std::size_t c = i / ZONE_CHUNK_SIZE;
+                    uint32_t v = static_cast<uint32_t>(col[i]);
+                    if (v < zm.chunks[c].min_val) zm.chunks[c].min_val = v;
+                    if (v > zm.chunks[c].max_val) zm.chunks[c].max_val = v;
+                }
+                return zm;
+            };
+            auto buildZM32 = [&](const std::vector<uint32_t>& col) -> ZoneMap {
+                ZoneMap zm;
+                zm.chunks.resize(nc);
+                for (std::size_t i = 0; i < col.size(); ++i) {
+                    std::size_t c = i / ZONE_CHUNK_SIZE;
+                    uint32_t v = col[i];
+                    if (v < zm.chunks[c].min_val) zm.chunks[c].min_val = v;
+                    if (v > zm.chunks[c].max_val) zm.chunks[c].max_val = v;
+                }
+                return zm;
+            };
+
+            part.zm_floor_area   = buildZM16(part.col_floor_area);
+            part.zm_resale_price = buildZM32(part.col_resale_price);
+            part.zm_month_year   = buildZM16(part.col_month_year);
+            part.zm_month_month  = buildZM8 (part.col_month_month);
+        }
+
+
+        // INNER LOOP: every (x,y) pair against this chunk.
+        {
+            QueryResult chunk_result;
+            runQuery(part, 1, 80, target_year, start_month, towns, chunk_result);
+        }
+        for (int x = 1; x <= 8; ++x) {
+            for (int y = 80; y <= 150; ++y) {
+                const std::size_t slot = (x - 1) * 71 + (y - 80);
+
+                QueryResult chunk_result;
+                runQuery(part, x, y, target_year, start_month, towns, chunk_result);
+
+                if (!chunk_result.no_result &&
+                    chunk_result.price_per_sqm < min_ppsm[slot]) {
+                    min_ppsm[slot]        = chunk_result.price_per_sqm;
+                    best_global_idx[slot] = chunk_start + chunk_result.local_idx;
+
+                    // Copy filter-side fields (year/month/floor_area/ppsm).
+                    // Display fields (town/block/...) are deferred to the
+                    // materialisation pass below.
+                    results[slot].year         = chunk_result.year;
+                    results[slot].month        = chunk_result.month;
+                    results[slot].floor_area   = chunk_result.floor_area;
+                    results[slot].price_per_sqm = chunk_result.price_per_sqm;
+                    results[slot].no_result    = false;
+                }
+            }
+        }
+
+        // `part` goes out of scope here — all per-chunk memory is freed.
+    }
+
+    // MATERIALISATION: lazy load display columns for the global winners.
+    for (std::size_t slot = 0; slot < NSLOTS; ++slot) {
+        if (results[slot].no_result) continue;
+        const std::size_t g = best_global_idx[slot];
+        results[slot].town       = loadStringAt(base_db.column_dir + "/town.col", g);
+        results[slot].block      = loadStringAt(base_db.column_dir + "/block.col", g);
+        results[slot].flat_model = loadStringAt(base_db.column_dir + "/flat_model.col", g);
+        results[slot].lease_commence_date =
+            loadUint16At(base_db.column_dir + "/lease_commence_date.col", g);
+    }
 }

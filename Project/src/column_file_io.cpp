@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 static void writeDictionary(std::ofstream& f, const DictionaryEncoder& dict) {
     const uint32_t num_entries = static_cast<uint32_t>(dict.id_to_str.size());
@@ -397,4 +398,117 @@ uint16_t loadUint16At(const std::string& filepath, std::size_t idx) {
     f.read(reinterpret_cast<char*>(&value), sizeof(value));
 
     return value;
+}
+
+// ============================================================================
+// D1: Chunked I/O helpers
+// ============================================================================
+
+std::size_t computeIOChunkRows(std::size_t memory_budget_bytes,
+                               bool        dict_encoding,
+                               bool        precomputed_ppsm) {
+    // Per-row cost of filter columns (only the ones the scan loop reads).
+    std::size_t bytes_per_row = 0;
+    bytes_per_row += sizeof(uint16_t);   // col_month_year
+    bytes_per_row += sizeof(uint8_t);    // col_month_month
+    bytes_per_row += sizeof(uint16_t);   // col_floor_area
+    bytes_per_row += sizeof(uint32_t);   // col_resale_price
+
+    // D1 requires dict encoding → town column is uint16_t per row.
+    // (Without dict encoding we'd need variable-width string seeks.)
+    if (dict_encoding) {
+        bytes_per_row += sizeof(uint16_t);
+    } else {
+        // Conservative estimate so the function still returns something
+        // sensible in the (unsupported) non-dict path — caller should refuse.
+        bytes_per_row += 24;  // SSO-aware std::string cost for HDB town names
+    }
+
+    if (precomputed_ppsm) {
+        bytes_per_row += sizeof(double);
+    }
+
+    // 20% safety margin for std::vector overhead + per-chunk zone maps.
+    const std::size_t usable_budget =
+        static_cast<std::size_t>(memory_budget_bytes * 0.8);
+
+    std::size_t rows = usable_budget / bytes_per_row;
+
+    // Lower bound aligned with ZONE_CHUNK_SIZE so B1 zone maps have
+    // something to prune at.
+    if (rows < ZONE_CHUNK_SIZE) rows = ZONE_CHUNK_SIZE;
+    return rows;
+}
+
+// Helper: read a fixed-width numeric column range into a vector.
+// Matches writeNumericCol's on-disk format:
+//   [uint32_t row_count] [T × row_count]
+template <typename T>
+static std::size_t readNumericRange(const std::string& filepath,
+                                    std::size_t        chunk_start,
+                                    std::size_t        chunk_rows,
+                                    std::vector<T>&    out) {
+    std::ifstream f(filepath, std::ios::binary);
+    if (!f.is_open()) {
+        throw std::runtime_error("Cannot open column file: " + filepath);
+    }
+
+    // Skip the 4-byte row-count header written by writeNumericCol.
+    constexpr std::streamoff HEADER_BYTES = sizeof(uint32_t);
+
+    // Read the header to know how many rows actually exist in the file.
+    uint32_t total_rows_in_file = 0;
+    f.read(reinterpret_cast<char*>(&total_rows_in_file), sizeof(total_rows_in_file));
+    const std::size_t total_rows = static_cast<std::size_t>(total_rows_in_file);
+
+    if (chunk_start >= total_rows) { out.clear(); return 0; }
+    const std::size_t to_read = std::min(chunk_rows, total_rows - chunk_start);
+
+    out.resize(to_read);
+    f.seekg(HEADER_BYTES + static_cast<std::streamoff>(chunk_start * sizeof(T)),
+            std::ios::beg);
+    f.read(reinterpret_cast<char*>(out.data()),
+           static_cast<std::streamsize>(to_read * sizeof(T)));
+    return to_read;
+}
+
+std::size_t loadColumnFilesChunk(const std::string& dir,
+                                 std::size_t        chunk_start,
+                                 std::size_t        chunk_rows,
+                                 ColumnStore&       db) {
+    // All numeric columns are fixed-width, so each is a simple seek + read.
+    std::size_t n = 0;
+    n = readNumericRange<uint16_t>(dir + "/month_year.col",
+                                   chunk_start, chunk_rows, db.col_month_year);
+    readNumericRange<uint8_t >(dir + "/month_month.col",
+                               chunk_start, chunk_rows, db.col_month_month);
+    readNumericRange<uint16_t>(dir + "/floor_area.col",
+                               chunk_start, chunk_rows, db.col_floor_area);
+    readNumericRange<uint32_t>(dir + "/resale_price.col",
+                               chunk_start, chunk_rows, db.col_resale_price);
+
+    // D1 requires dict encoding → town_encoded.col is a uint16_t column.
+    if (db.use_dict_encoding) {
+        readNumericRange<uint16_t>(dir + "/town_encoded.col",
+                                   chunk_start, chunk_rows, db.col_town_encoded);
+    }
+
+    // A4: precomputed PPSM column (if the on-disk copy exists)
+    if (db.use_precomputed_ppsm) {
+        readNumericRange<double>(dir + "/price_per_sqm.col",
+                                 chunk_start, chunk_rows, db.col_price_per_sqm);
+    }
+
+    // Update byte counter (approx: we read `n` rows from ~5 files at their
+    // respective sizeof cost; cheaper to just sum the vector bytes).
+    std::size_t bytes = 0;
+    bytes += db.col_month_year.size()   * sizeof(uint16_t);
+    bytes += db.col_month_month.size()  * sizeof(uint8_t);
+    bytes += db.col_floor_area.size()   * sizeof(uint16_t);
+    bytes += db.col_resale_price.size() * sizeof(uint32_t);
+    bytes += db.col_town_encoded.size() * sizeof(uint16_t);
+    bytes += db.col_price_per_sqm.size() * sizeof(double);
+    db.io_bytes_read += bytes;
+
+    return n;
 }
