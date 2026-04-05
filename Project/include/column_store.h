@@ -253,6 +253,29 @@ struct ColumnStore {
 
     // Row count (read from meta.col, used to pre-size vectors)
     std::size_t total_rows = 0;
+    
+    // ── D1: Chunked I/O with memory budget ──
+    // When true, runAllQueriesChunked() streams filter columns off disk one
+    // chunk at a time instead of loading them all up front. Each chunk is
+    // sized so its filter columns fit inside memory_budget_bytes.
+    //
+    // Requires: use_columnar_files = true (depends on A9 .col files)
+    // Requires: use_dict_encoding = true  (sidesteps variable-width town.col)
+    // Composes with: B1, A1, C4, C6, A4, C3
+    // Incompatible with: use_reuse (reuse loads everything and bypasses scan)
+    bool use_chunked_io = false;
+
+    // User-facing memory budget in bytes. Default 50 MB.
+    std::size_t memory_budget_bytes = 50 * 1024 * 1024;
+
+    // Computed at query time from memory_budget_bytes + enabled flags.
+    std::size_t io_chunk_rows = 0;
+
+    // Observability counters for the report.
+    // Mutable so runAllQueriesChunked can update them via a const ref.
+    mutable std::size_t io_chunks_loaded = 0;
+    mutable std::size_t io_bytes_read    = 0;
+
 
     // Zone maps for filterable numeric columns
     ZoneMap zm_floor_area;       // used for: floor_area >= y
