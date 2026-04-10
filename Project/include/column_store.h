@@ -240,6 +240,48 @@ struct ColumnStore {
     // Composes with: A1, C4, C6, A4 (all scan-path flags).
     // Irrelevant when use_reuse is on (scan is bypassed entirely).
     bool use_zone_maps = false;
+    
+    // Late materialisation (C3)
+    // When true, the scan loop's filter phase only accesses year, month,
+    // town, and floor_area columns. Resale_price (and col_price_per_sqm)
+    // are deferred to a second pass over surviving row indices only.
+    // Composes with: A1, A4, C4, C6, B1. Irrelevant when use_reuse is on.
+    bool use_late_materialise = false;
+
+    // ── A9: Separate Binary Column Files ──
+    // When true, data is read from pre-written per-column binary files
+    // instead of parsing the CSV at runtime. Only filter columns loaded upfront;
+    // materialisation columns loaded lazily for the winning row only.
+    bool use_columnar_files = false;
+
+    // Path to the directory containing .col files
+    std::string column_dir = "data/columns";
+
+    // Row count (read from meta.col, used to pre-size vectors)
+    std::size_t total_rows = 0;
+    
+    // ── D1: Chunked I/O with memory budget ──
+    // When true, runAllQueriesChunked() streams filter columns off disk one
+    // chunk at a time instead of loading them all up front. Each chunk is
+    // sized so its filter columns fit inside memory_budget_bytes.
+    //
+    // Requires: use_columnar_files = true (depends on A9 .col files)
+    // Requires: use_dict_encoding = true  (sidesteps variable-width town.col)
+    // Composes with: B1, A1, C4, C6, A4, C3
+    // Incompatible with: use_reuse (reuse loads everything and bypasses scan)
+    bool use_chunked_io = false;
+
+    // User-facing memory budget in bytes. Default 50 MB.
+    std::size_t memory_budget_bytes = 50 * 1024 * 1024;
+
+    // Computed at query time from memory_budget_bytes + enabled flags.
+    std::size_t io_chunk_rows = 0;
+
+    // Observability counters for the report.
+    // Mutable so runAllQueriesChunked can update them via a const ref.
+    mutable std::size_t io_chunks_loaded = 0;
+    mutable std::size_t io_bytes_read    = 0;
+
 
     // Zone maps for filterable numeric columns
     ZoneMap zm_floor_area;       // used for: floor_area >= y
