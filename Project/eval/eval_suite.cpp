@@ -665,18 +665,11 @@ int main(int argc, char* argv[]) {
         { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true,  false, false, false, false, false },
         { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true,  false, false, false, false, false },
         { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true,  false, false, false, false, false },
-
         { "B1: Zone Maps",                                                                       false, false, false, false, false, true,  false, false, false, false },
         { "A1+B1: Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false, false, false },
         { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true,  true,  true,  true,  false, false, false, false },
+        //  have no effect, but proves no conflict
         { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true,  false, false, false, true,  false, false, false, false },
-
-        { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false },
-        { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, true,  false, false },
-        { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  true,  false, false },
-        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  true,  false, false },
-        { "A2+B3+A4+C6: Pre-sorted + Month Binary Search + Precompute PPSM + Int Multiply",    false, false, true,  true,  false, false, true,  true,  false, false },
-
         { "C3: Late Materialise",                                                                false, false, false, false, false, false, false, false, true,  false },
         { "A1+C3: Dict+LateMat",                                                                 true,  false, false, false, false, false, false, false, true,  false },
         { "A1+C3+C4: Dict+LateMat+PredReorder",                                                  true,  false, false, false, true,  false, false, false, true,  false },
@@ -695,6 +688,13 @@ int main(int argc, char* argv[]) {
         { "D1: Chunked I/O 2MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 2  },
         { "D1: Chunked I/O 1MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 1  },
         { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, true,  true,  true, 50 },
+
+        { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false },
+        { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, true,  false, false },
+        { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  true,  false, false },
+        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  true,  false, false },
+        { "A2+B3+A4+C6: Pre-sorted + Month Binary Search + Precompute PPSM + Int Multiply",    false, false, true,  true,  false, false, true,  true,  false, false },
+
     };
 
     // =====================================================================
