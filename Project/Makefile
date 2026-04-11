@@ -7,6 +7,8 @@
 #   make run      — build and run with a default matric number (for quick testing)
 # =============================================================================
 
+.PHONY: run test eval clean
+
 CXX      := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -Iinclude
 
@@ -18,7 +20,8 @@ SRCS     := main.cpp \
             src/column_store.cpp \
             src/csv_parser.cpp   \
             src/query_engine.cpp \
-            src/output_writer.cpp
+            src/output_writer.cpp \
+            src/column_file_io.cpp
 
 # Derive object file names (placed alongside their sources)
 OBJS     := $(SRCS:.cpp=.o)
@@ -44,9 +47,23 @@ test:
 		src/csv_parser.cpp \
 		src/query_engine.cpp \
 		src/output_writer.cpp \
+		src/column_file_io.cpp \
 		-o test_runner
 	@echo "Test build successful: test_runner"
 	./test_runner
+
+# Build and run evaluation suite
+eval:
+	$(CXX) $(CXXFLAGS) \
+		eval/eval_suite.cpp \
+		src/column_store.cpp \
+		src/csv_parser.cpp \
+		src/query_engine.cpp \
+		src/output_writer.cpp \
+		src/column_file_io.cpp \
+		-o eval_runner
+	@echo "Eval build successful: eval_runner"
+	./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5
 
 # Remove build artifacts
 clean:

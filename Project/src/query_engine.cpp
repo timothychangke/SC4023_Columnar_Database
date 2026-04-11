@@ -251,6 +251,7 @@ void runQuery(const ColumnStore&              db,
                 if (ppsm < min_ppsm) {
                     min_ppsm = ppsm;
                     best_i   = i;
+                    result.local_idx = i;  // A9: needed for columnar file lazy materialisation
                     result.no_result = false;
                 }
             }

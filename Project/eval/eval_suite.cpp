@@ -32,6 +32,7 @@
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,37 @@
 // =============================================================================
 // Performance counters (global, reset before each config run)
 // =============================================================================
+class TeeBuf : public std::streambuf {
+public:
+    TeeBuf(std::streambuf* first, std::streambuf* second)
+        : first_(first), second_(second) {}
+
+protected:
+    int overflow(int ch) override {
+        if (ch == traits_type::eof()) {
+            return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
+        }
+
+        const int r1 = first_ ? first_->sputc(static_cast<char>(ch)) : traits_type::not_eof(ch);
+        const int r2 = second_ ? second_->sputc(static_cast<char>(ch)) : traits_type::not_eof(ch);
+        if (traits_type::eq_int_type(r1, traits_type::eof()) ||
+            traits_type::eq_int_type(r2, traits_type::eof())) {
+            return traits_type::eof();
+        }
+        return ch;
+    }
+
+    int sync() override {
+        const int s1 = first_ ? first_->pubsync() : 0;
+        const int s2 = second_ ? second_->pubsync() : 0;
+        return (s1 == 0 && s2 == 0) ? 0 : -1;
+    }
+
+private:
+    std::streambuf* first_;
+    std::streambuf* second_;
+};
+
 namespace perf {
     uint64_t rows_scanned     = 0;  // total row iterations across all queries
     uint64_t town_comparisons = 0;  // town predicate comparisons (string or int)
@@ -408,8 +440,9 @@ static BenchmarkResult runBenchmark(
     if (config.columnar_files) {
         // Use a config-specific directory so different flag combos don't clash
         std::string col_dir = "data/columns";
-        if (config.dict_encoding)   col_dir += "_dict";
-        if (config.precompute_ppsm) col_dir += "_ppsm";
+        if (config.dict_encoding)    col_dir += "_dict";
+        if (config.precompute_ppsm)  col_dir += "_ppsm";
+        if (config.presorted_storage) col_dir += "_a2";
         db.column_dir = col_dir;
 
         std::cout << "  [A9] column_dir = " << db.column_dir << "\n";
@@ -423,6 +456,7 @@ static BenchmarkResult runBenchmark(
             ColumnStore tmp;
             tmp.use_dict_encoding    = config.dict_encoding;
             tmp.use_precomputed_ppsm = config.precompute_ppsm;
+            tmp.use_presorted_storage = config.presorted_storage;
             loadCSV(csv_path, tmp);
             writeColumnFiles(tmp, db.column_dir);
             std::cout << "  [A9] Column files written to " << db.column_dir << "\n";
@@ -633,13 +667,24 @@ static std::string formatCount(uint64_t n) {
 int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0]
-                  << " <path_to_csv> <MatriculationNumber> [num_runs=5]\n";
+                  << " <path_to_csv> <MatriculationNumber> [num_runs=5] [output_file]\n";
         return 1;
     }
 
     const std::string csv_path = argv[1];
     const std::string matric   = argv[2];
     const int num_runs = (argc >= 4) ? std::atoi(argv[3]) : 5;
+    const std::string output_file =
+        (argc >= 5) ? argv[4] : ("EvalResult_" + matric + ".txt");
+
+    std::ofstream out(output_file);
+    if (!out.is_open()) {
+        std::cerr << "Failed to open eval output file: " << output_file << "\n";
+        return 1;
+    }
+    TeeBuf tee_buf(std::cout.rdbuf(), out.rdbuf());
+    std::streambuf* original_cout = std::cout.rdbuf(&tee_buf);
+    std::cerr << "Eval output will be written to: " << output_file << "\n";
 
     std::cout << "========================================\n";
     std::cout << "  HDB Column Store – Evaluation Suite\n";
@@ -694,7 +739,8 @@ int main(int argc, char* argv[]) {
         { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  true,  false, false },
         { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  true,  false, false },
         { "A2+B3+A4+C6: Pre-sorted + Month Binary Search + Precompute PPSM + Int Multiply",    false, false, true,  true,  false, false, true,  true,  false, false },
-
+        { "A9+A2+B3+A4+C6: ColFile+Presort+MonthBSearch+PPSM+IntMul",                            false, false, true,  true,  false, false, true,  true,  false, true  },
+        { "A9+A2+B3: ColFile+Presort+MonthBSearch",                                              false, false, false, false, false, false, true,  true,  false, true  },
     };
 
     // =====================================================================
@@ -880,5 +926,9 @@ int main(int argc, char* argv[]) {
     std::cout << "  OVERALL: " << (all_correct ? "ALL CONFIGS CORRECT" : "SOME CONFIGS FAILED")
               << "\n========================================\n";
 
-    return all_correct ? 0 : 1;
+    const int exit_code = all_correct ? 0 : 1;
+    std::cout.flush();
+    std::cout.rdbuf(original_cout);
+    std::cerr << "Eval report written to: " << output_file << "\n";
+    return exit_code;
 }

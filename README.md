@@ -12,6 +12,7 @@ A column-oriented in-memory database engine written in C++ for querying Singapor
 - [Requirements](#requirements)
 - [Building](#building)
 - [Usage](#usage)
+- [Evaluation Suite Usage](#evaluation-suite-usage)
 - [How Query Parameters Are Derived](#how-query-parameters-are-derived)
 - [Output Format](#output-format)
 - [Error Handling](#error-handling)
@@ -130,6 +131,19 @@ g++ -std=c++17 -Wall -Wextra -Iinclude \
         -o test_runner
 ```
 
+    To build the evaluation suite:
+
+    ```bash
+    g++ -std=c++17 -Wall -Wextra -Iinclude \
+      eval/eval_suite.cpp \
+      src/column_store.cpp \
+      src/csv_parser.cpp \
+      src/query_engine.cpp \
+      src/output_writer.cpp \
+      src/column_file_io.cpp \
+      -o eval_runner
+    ```
+
 ---
 
 ## Usage
@@ -170,6 +184,32 @@ Output written to : ScanResult_A5656567B.csv
 Valid (x,y) pairs : 47
 Done.
 ```
+
+---
+
+## Evaluation Suite Usage
+
+Run from the `Project` directory:
+
+```bash
+./eval_runner <path_to_csv> <MatriculationNumber> [num_runs=5] [output_file]
+```
+
+Examples:
+
+```bash
+# default output file: EvalResult_A5656567B.txt
+./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5
+
+# custom output file name
+./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5 mycustom67file.txt
+```
+
+Notes:
+
+- The suite now writes the full report to file **and** prints progress to terminal.
+- Exit code `0` means all configurations matched baseline correctness.
+- Exit code `1` means at least one configuration failed correctness.
 
 ---
 

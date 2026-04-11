@@ -86,6 +86,7 @@ int main(int argc, char* argv[]) {
         }
         if (std::strcmp(argv[i], "--month-bsearch") == 0) {
             enable_month_bsearch = true;
+        }
         if (std::strcmp(argv[i], "--late-materialise") == 0) {
             enable_late_materialise = true;
         }
