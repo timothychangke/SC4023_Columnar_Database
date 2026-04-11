@@ -100,8 +100,6 @@ make
 
 # Remove compiled objects and the executable
 make clean
-# For Windows:
-Remove-Item -Force -ErrorAction SilentlyContinue main.o, src\column_store.o, src\csv_parser.o, src\query_engine.o, src\output_writer.o, column_store.exe, column_store ; make
 ```
 
 To build manually without `make`:
@@ -131,18 +129,29 @@ g++ -std=c++17 -Wall -Wextra -Iinclude \
         -o test_runner
 ```
 
-    To build the evaluation suite:
+To build the evaluation suite:
 
-    ```bash
-    g++ -std=c++17 -Wall -Wextra -Iinclude \
-      eval/eval_suite.cpp \
-      src/column_store.cpp \
-      src/csv_parser.cpp \
-      src/query_engine.cpp \
-      src/output_writer.cpp \
-      src/column_file_io.cpp \
-      -o eval_runner
-    ```
+```bash
+# Windows
+g++ -std=c++17 -Wall -Wextra -Iinclude `
+  eval/eval_suite.cpp `
+  src/column_store.cpp `
+  src/csv_parser.cpp `
+  src/query_engine.cpp `
+  src/output_writer.cpp `
+  src/column_file_io.cpp `
+  -o eval_runner
+
+# Linux
+g++ -std=c++17 -Wall -Wextra -Iinclude \
+  eval/eval_suite.cpp \
+  src/column_store.cpp \
+  src/csv_parser.cpp \
+  src/query_engine.cpp \
+  src/output_writer.cpp \
+  src/column_file_io.cpp \
+  -o eval_runner
+```
 
 ---
 
@@ -189,7 +198,7 @@ Done.
 
 ## Evaluation Suite Usage
 
-Run from the `Project` directory:
+After running `make eval`, run from the `Project` directory:
 
 ```bash
 ./eval_runner <path_to_csv> <MatriculationNumber> [num_runs=5] [output_file]
