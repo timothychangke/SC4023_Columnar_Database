@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -675,7 +676,20 @@ int main(int argc, char* argv[]) {
     const std::string matric   = argv[2];
     const int num_runs = (argc >= 4) ? std::atoi(argv[3]) : 5;
     const std::string output_file =
-        (argc >= 5) ? argv[4] : ("EvalResult_" + matric + ".txt");
+        (argc >= 5) ? ("results/" + std::string(argv[4])) : ("results/EvalResult_" + matric + ".txt");
+
+    {
+        std::filesystem::path out_path(output_file);
+        if (out_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(out_path.parent_path(), ec);
+            if (ec) {
+                std::cerr << "Failed to create output directory: "
+                          << out_path.parent_path().string() << " (" << ec.message() << ")\n";
+                return 1;
+            }
+        }
+    }
 
     std::ofstream out(output_file);
     if (!out.is_open()) {

@@ -61,3 +61,6 @@ __pycache__/
 doxygen/
 html/
 latex/
+
+# Eval results
+/Project/results/*

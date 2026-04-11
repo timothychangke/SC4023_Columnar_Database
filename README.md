@@ -132,17 +132,6 @@ g++ -std=c++17 -Wall -Wextra -Iinclude \
 To build the evaluation suite:
 
 ```bash
-# Windows
-g++ -std=c++17 -Wall -Wextra -Iinclude `
-  eval/eval_suite.cpp `
-  src/column_store.cpp `
-  src/csv_parser.cpp `
-  src/query_engine.cpp `
-  src/output_writer.cpp `
-  src/column_file_io.cpp `
-  -o eval_runner
-
-# Linux
 g++ -std=c++17 -Wall -Wextra -Iinclude \
   eval/eval_suite.cpp \
   src/column_store.cpp \
@@ -207,10 +196,10 @@ After running `make eval`, run from the `Project` directory:
 Examples:
 
 ```bash
-# default output file: EvalResult_A5656567B.txt
+# default output file: /results/EvalResult_A5656567B.txt
 ./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5
 
-# custom output file name
+# custom output file name: /results/mycustom67file.txt
 ./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5 mycustom67file.txt
 ```
 
