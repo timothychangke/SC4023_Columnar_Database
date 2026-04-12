@@ -187,11 +187,13 @@ Done.
 
 ## Evaluation Suite Usage
 
-After running `make eval`, run from the `Project` directory:
+If you have built the eval suite using the commands above, run from the `Project` directory:
 
 ```bash
 ./eval_runner <path_to_csv> <MatriculationNumber> [num_runs=5] [output_file]
 ```
+
+Note that `make eval` will build the eval suite and run it automatically for 5 runs.
 
 Examples:
 
@@ -208,6 +210,66 @@ Notes:
 - The suite now writes the full report to file **and** prints progress to terminal.
 - Exit code `0` means all configurations matched baseline correctness.
 - Exit code `1` means at least one configuration failed correctness.
+
+### How to interpret the evaluation results
+
+```sh
+Configuration                      Load (ms)    Query (ms)    Total (ms)       Speedup  Rows Scanned     Town Cmps     Rows Pass   Valid (x,y)        Memory
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+Baseline                               762.3      1214.695        1977.0         1.00x       147.25M        12.55M        308.9K           568       73.2 MB
+C1+C2: Result Reuse                    839.2         2.471         841.6       491.58x        259.2K         12.5K             0           568       73.2 MB
+A9+A2+B3: ColFile+Presort+MonthBSearch          20.4       115.724         136.1        10.50x        751.7K             0        308.9K           568        2.7 MB
+```
+
+The `Speedup` column in the performance table is currently **query-phase speedup**:
+
+$$
+  ext{Query Speedup} = \frac{\text{Baseline Query Time}}{\text{Config Query Time}}
+$$
+
+This is useful, but it does **not** include data loading/setup cost.
+
+For end-to-end comparison, also compute:
+
+$$
+  ext{Overall Speedup} = \frac{\text{Baseline Total Time}}{\text{Config Total Time}}
+$$
+
+#### Example 1: `C1+C2` (Result Reuse)
+
+- Query speedup shown in table: **491.58x**
+  - Baseline query: `1214.695 ms`
+  - `C1+C2` query: `2.471 ms`
+- Overall speedup (using total):
+  - Baseline total: `1977.0 ms`
+  - `C1+C2` total: `841.6 ms`
+  - Overall: $1977.0 / 841.6 \approx 2.35\text{x}$
+
+Interpretation: excellent query acceleration, but total gain is smaller because load/setup still costs time.
+
+#### Example 2: `A9+A2+B3` (Column Files + Presort + Month Binary Search)
+
+- Query speedup shown in table: **10.50x**
+  - Baseline query: `1214.695 ms`
+  - `A9+A2+B3` query: `115.724 ms`
+- Overall speedup (using total):
+  - Baseline total: `1977.0 ms`
+  - `A9+A2+B3` total: `136.1 ms`
+  - Overall: $1977.0 / 136.1 \approx 14.53\text{x}$
+
+Interpretation: this strategy improves both load and query time, so overall speedup is very strong.
+
+#### Most essential statistics to report
+
+When comparing configurations, prioritize these columns:
+
+1. **Total (ms)** : primary end-to-end metric.
+2. **Load (ms)** and **Query (ms)** : explains where gains/losses come from.
+3. **Rows Scanned** and **Town Cmps** : confirms pruning/filter efficiency.
+4. **Memory** : checks space-performance tradeoff.
+5. **Valid (x,y)** : must match baseline (correctness guard).
+
+Practical rule: pick the configuration with the best **Total (ms)** among those with identical correctness.
 
 ---
 
