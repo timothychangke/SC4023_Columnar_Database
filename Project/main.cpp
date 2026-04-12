@@ -39,7 +39,7 @@ int main(int argc, char* argv[]) {
     // phase 0: check command line args
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [flags...]\n"
-        << "Flags: --dict-encoding --presort-storage --month-bsearch --reuse\n"
+        << "Flags: --dict-encoding --bitmap-index-town --presort-storage --month-bsearch --reuse\n"
         << "       --precompute-ppsm --int-multiply --predicate-reorder --zone-maps --late-materialise\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
         std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
@@ -56,6 +56,7 @@ int main(int argc, char* argv[]) {
     bool enable_int_multiply       = false;
     bool enable_predicate_reorder  = false;
     bool enable_zone_maps = false;
+    bool enable_bitmap_index_town = false;
     bool enable_presorted_storage = false;
     bool enable_month_bsearch = false;
     bool enable_late_materialise = false;
@@ -80,6 +81,9 @@ int main(int argc, char* argv[]) {
         }
         if (std::strcmp(argv[i], "--zone-maps") == 0) {
             enable_zone_maps = true;
+        }
+        if (std::strcmp(argv[i], "--bitmap-index-town") == 0) {
+            enable_bitmap_index_town = true;
         }
         if (std::strcmp(argv[i], "--presort-storage") == 0) {
             enable_presorted_storage = true;
@@ -112,6 +116,8 @@ int main(int argc, char* argv[]) {
               << (enable_predicate_reorder ? "ON" : "OFF") << "\n";
     std::cout << "  Zone Maps: "
           << (enable_zone_maps ? "ON" : "OFF") << "\n";
+        std::cout << "  Bitmap Index (Town): "
+            << (enable_bitmap_index_town ? "ON" : "OFF") << "\n";
         std::cout << "  Pre-sorted Storage (A2):       "
             << (enable_presorted_storage ? "ON" : "OFF") << "\n";
         std::cout << "  Month Binary Search (B3):      "
@@ -154,6 +160,7 @@ int main(int argc, char* argv[]) {
     db.use_int_multiply      = enable_int_multiply;
     db.use_predicate_reorder = enable_predicate_reorder;
     db.use_zone_maps = enable_zone_maps;
+    db.use_bitmap_index_town = enable_bitmap_index_town;
     db.use_presorted_storage = enable_presorted_storage;
     db.use_month_binary_search = enable_month_bsearch;
     db.use_late_materialise = enable_late_materialise;
@@ -189,6 +196,13 @@ int main(int argc, char* argv[]) {
     std::vector<QueryResult> all_results;
     all_results.reserve(8 * 71); 
 
+    std::vector<uint8_t> town_bitmap_mask;
+    const std::vector<uint8_t>* town_bitmap_mask_ptr = nullptr;
+    if (db.use_bitmap_index_town) {
+        town_bitmap_mask = buildTownBitmapMask(db, towns);
+        town_bitmap_mask_ptr = &town_bitmap_mask;
+    }
+
     // if opted for optimisation 2 (reuse)
     if (!db.use_dict_encoding && db.use_reuse) {
         std::cout << "Building intermediate cumulative table for reuse...\n";
@@ -199,7 +213,7 @@ int main(int argc, char* argv[]) {
     for (int x = 1; x <= 8; ++x) {
         for (int y = 80; y <= 150; ++y) {
             QueryResult result;
-            runQuery(db, x, y, target_year, start_month, towns, result);
+            runQuery(db, x, y, target_year, start_month, towns, result, town_bitmap_mask_ptr);
             all_results.push_back(result);
         }
     }

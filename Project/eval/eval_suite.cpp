@@ -80,6 +80,8 @@ private:
 namespace perf {
     uint64_t rows_scanned     = 0;  // total row iterations across all queries
     uint64_t town_comparisons = 0;  // town predicate comparisons (string or int)
+    uint64_t town_bitmap_lookups = 0;       // number of town bitmaps OR-ed
+    uint64_t rows_eliminated_by_bitmap = 0; // rows pruned by bitmap mask
     uint64_t rows_passed      = 0;  // rows that passed all filters
     uint64_t queries_valid    = 0;  // (x,y) pairs with a valid result
     uint64_t chunks_total     = 0;  // total chunks evaluated 
@@ -88,6 +90,8 @@ namespace perf {
     void reset() {
         rows_scanned = 0;
         town_comparisons = 0;
+        town_bitmap_lookups = 0;
+        rows_eliminated_by_bitmap = 0;
         rows_passed = 0;
         queries_valid = 0;
         chunks_total = 0;
@@ -111,6 +115,7 @@ struct OptConfig {
     bool columnar_files;        // A9
     bool        chunked_io      = false;  // D1
     std::size_t memory_budget_mb = 50;    // D1
+    bool bitmap_index_town = false; // B2
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
@@ -124,6 +129,7 @@ struct OptConfig {
         db.use_month_binary_search = month_binary_search;
         db.use_late_materialise = late_materialise;
         db.use_columnar_files = columnar_files;
+        db.use_bitmap_index_town = bitmap_index_town;
         db.use_chunked_io      = chunked_io;
         db.memory_budget_bytes = memory_budget_mb * 1024 * 1024;
     }
@@ -234,6 +240,15 @@ static std::size_t estimateMemoryBytes(const ColumnStore& db) {
     bytes += zmBytes(db.zm_month_year);
     bytes += zmBytes(db.zm_month_month);
 
+    // bitmap index overhead (B2)
+    // vector<bool> stores bits packed; include per-town vector overhead too.
+    for (const auto& bm : db.town_bitmaps) {
+        bytes += sizeof(std::vector<bool>);
+        bytes += (bm.capacity() + 7) / 8;
+    }
+    bytes += db.town_bitmap_lookup.bucket_count() *
+             (sizeof(void*) + sizeof(std::pair<std::string, uint16_t>));
+
     return bytes;
 }
 
@@ -247,9 +262,17 @@ static void runQueryInstrumented(
     uint16_t                        target_year,
     uint8_t                         start_month,
     const std::vector<std::string>& towns,
+    const std::vector<uint8_t>*     precomputed_town_mask,
     QueryResult&                    result)
 {
-    runQuery(db, x, y, target_year, start_month, towns, result);
+    const uint64_t prev_bitmap_lookups = db.town_bitmap_lookups;
+    const uint64_t prev_bitmap_eliminated = db.rows_eliminated_by_bitmap;
+
+    runQuery(db, x, y, target_year, start_month, towns, result, precomputed_town_mask);
+
+    perf::town_bitmap_lookups += (db.town_bitmap_lookups - prev_bitmap_lookups);
+    perf::rows_eliminated_by_bitmap +=
+        (db.rows_eliminated_by_bitmap - prev_bitmap_eliminated);
 
     if (db.use_reuse) {
         if (!result.no_result) ++perf::queries_valid;
@@ -290,6 +313,34 @@ static void runQueryInstrumented(
 
     // pre-resolve town IDs if dict encoding is on
     std::vector<uint16_t> town_ids;
+    std::vector<bool> town_mask;
+    const bool use_bitmap_count = db.use_bitmap_index_town &&
+                                  !db.town_bitmaps.empty() &&
+                                  db.town_bitmaps.front().size() == N;
+
+    if (use_bitmap_count) {
+        town_mask.assign(N, false);
+        if (db.use_dict_encoding) {
+            for (const auto& t : towns) {
+                uint16_t id = 0;
+                if (!db.dict_town.lookup(t, id) || id >= db.town_bitmaps.size()) continue;
+                const auto& bm = db.town_bitmaps[id];
+                for (std::size_t i = 0; i < N; ++i) {
+                    town_mask[i] = town_mask[i] || bm[i];
+                }
+            }
+        } else {
+            for (const auto& t : towns) {
+                auto it = db.town_bitmap_lookup.find(t);
+                if (it == db.town_bitmap_lookup.end() || it->second >= db.town_bitmaps.size()) continue;
+                const auto& bm = db.town_bitmaps[it->second];
+                for (std::size_t i = 0; i < N; ++i) {
+                    town_mask[i] = town_mask[i] || bm[i];
+                }
+            }
+        }
+    }
+
     if (db.use_dict_encoding) {
         for (const auto& t : towns) {
             uint16_t id;
@@ -346,7 +397,9 @@ static void runQueryInstrumented(
 
         if (db.use_predicate_reorder) {
             // C4 ON: Town → Year → Month
-            if (db.use_dict_encoding) {
+            if (use_bitmap_count) {
+                if (!town_mask[i]) continue;
+            } else if (db.use_dict_encoding) {
                 bool match = false;
                 for (const auto& tid : town_ids) {
                     ++local_town_cmp;
@@ -367,7 +420,9 @@ static void runQueryInstrumented(
             // C4 OFF: Year → Month → Town
             if (db.col_month_year[i] != target_year) continue;
             if (db.col_month_month[i] < start_month || db.col_month_month[i] > end_month) continue;
-            if (db.use_dict_encoding) {
+            if (use_bitmap_count) {
+                if (!town_mask[i]) continue;
+            } else if (db.use_dict_encoding) {
                 bool match = false;
                 for (const auto& tid : town_ids) {
                     ++local_town_cmp;
@@ -402,12 +457,14 @@ struct BenchmarkResult {
     double      load_time_ms;
     double      query_time_ms;       // average across num_runs
     double      total_time_ms;       // load + query avg
-    uint64_t    rows_scanned;
-    uint64_t    town_comparisons;
-    uint64_t    rows_passed;
-    uint64_t    queries_valid;
-    uint64_t    chunks_total;        // B1: total chunks evaluated
-    uint64_t    chunks_skipped;      // B1: chunks skipped by zone map pruning
+    uint64_t    rows_scanned = 0;
+    uint64_t    town_comparisons = 0;
+    uint64_t    town_bitmap_lookups = 0;
+    uint64_t    rows_eliminated_by_bitmap = 0;
+    uint64_t    rows_passed = 0;
+    uint64_t    queries_valid = 0;
+    uint64_t    chunks_total = 0;        // B1: total chunks evaluated
+    uint64_t    chunks_skipped = 0;      // B1: chunks skipped by zone map pruning
     std::size_t memory_bytes;
     std::size_t dict_town_size;
     std::size_t dict_flat_type_size;
@@ -432,6 +489,8 @@ static BenchmarkResult runBenchmark(
     uint8_t  start_month = 0;
     deriveQueryParams(matric_number, target_year, start_month);
     auto towns = buildTownList(matric_number);
+    std::vector<uint8_t> town_bitmap_mask;
+    const std::vector<uint8_t>* town_bitmap_mask_ptr = nullptr;
 
     // --- LOAD PHASE (timed once) ---
     ColumnStore db;
@@ -497,6 +556,11 @@ static BenchmarkResult runBenchmark(
     bm.load_time_ms = std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
     bm.memory_bytes = estimateMemoryBytes(db);
 
+    if (config.bitmap_index_town) {
+        town_bitmap_mask = buildTownBitmapMask(db, towns);
+        town_bitmap_mask_ptr = &town_bitmap_mask;
+    }
+
     // --- build cumulative table if reuse is enabled ---
     if (config.reuse) {
         db.cum_table = buildCumulativeTable(db, target_year, start_month, towns);;
@@ -514,6 +578,9 @@ static BenchmarkResult runBenchmark(
 
     for (int run = 0; run < num_runs; ++run) {
         perf::reset();
+        db.town_bitmap_lookups = 0;
+        db.town_bitmap_evaluations = 0;
+        db.rows_eliminated_by_bitmap = 0;
         std::vector<QueryResult> results;
         results.reserve(8 * 71);
 
@@ -543,7 +610,8 @@ static BenchmarkResult runBenchmark(
             for (int x = 1; x <= 8; ++x) {
                 for (int y = 80; y <= 150; ++y) {
                     QueryResult result;
-                    runQueryInstrumented(db, x, y, target_year, start_month, towns, result);
+                    runQueryInstrumented(db, x, y, target_year, start_month, towns,
+                                         town_bitmap_mask_ptr, result);
                     results.push_back(result);
                 }
             }
@@ -557,6 +625,8 @@ static BenchmarkResult runBenchmark(
             bm.results          = std::move(results);
             bm.rows_scanned     = perf::rows_scanned;
             bm.town_comparisons = perf::town_comparisons;
+            bm.town_bitmap_lookups = perf::town_bitmap_lookups;
+            bm.rows_eliminated_by_bitmap = perf::rows_eliminated_by_bitmap;
             bm.rows_passed      = perf::rows_passed;
             bm.queries_valid    = perf::queries_valid;
             bm.chunks_total     = perf::chunks_total;
@@ -727,6 +797,12 @@ int main(int argc, char* argv[]) {
         { "B1: Zone Maps",                                                                       false, false, false, false, false, true,  false, false, false, false },
         { "A1+B1: Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false, false, false },
         { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true,  true,  true,  true,  false, false, false, false },
+        { "B2: Bitmap Town Index",                                                               false, false, false, false, false, false, false, false, false, false, false, 50, true },
+        { "A1+B2: Dict + Bitmap Town",                                                           true,  false, false, false, false, false, false, false, false, false, false, 50, true },
+        { "A2+B2: Presort + Bitmap Town",                                                        false, false, false, false, false, false, true,  false, false, false, false, 50, true },
+        { "B1+B2: Zone Maps + Bitmap Town",                                                      false, false, false, false, false, true,  false, false, false, false, false, 50, true },
+        { "C3+B2: LateMat + Bitmap Town",                                                        false, false, false, false, false, false, false, false, true,  false, false, 50, true },
+        { "A1+A2+B1+C3+B2: Full Scan Stack + Bitmap",                                            true,  false, false, false, true,  true,  true,  false, true,  false, false, 50, true },
         //  have no effect, but proves no conflict
         { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true,  false, false, false, true,  false, false, false, false },
         { "C3: Late Materialise",                                                                false, false, false, false, false, false, false, false, true,  false },
@@ -879,6 +955,29 @@ int main(int argc, char* argv[]) {
             std::cout << "    Chunks skipped: " << formatCount(bm.chunks_skipped) << "\n";
             std::cout << std::fixed << std::setprecision(1);
             std::cout << "    Skip rate:      " << skip_rate << "%\n";
+        }
+    }
+
+    // =====================================================================
+    // Bitmap index stats (if any config uses B2)
+    // =====================================================================
+    bool any_b2 = false;
+    for (const auto& bm : all_results) {
+        if (bm.town_bitmap_lookups > 0 || bm.rows_eliminated_by_bitmap > 0) {
+            any_b2 = true;
+            break;
+        }
+    }
+
+    if (any_b2) {
+        std::cout << "\n========================================\n";
+        std::cout << "  BITMAP INDEX STATS (B2)\n";
+        std::cout << "========================================\n";
+        for (const auto& bm : all_results) {
+            if (bm.town_bitmap_lookups == 0 && bm.rows_eliminated_by_bitmap == 0) continue;
+            std::cout << "  " << bm.config_name << ":\n";
+            std::cout << "    Bitmap lookups:      " << formatCount(bm.town_bitmap_lookups) << "\n";
+            std::cout << "    Rows eliminated:     " << formatCount(bm.rows_eliminated_by_bitmap) << "\n";
         }
     }
 
