@@ -2159,8 +2159,8 @@ int main()
   testDictEncodingQuery(t);
   testDictEncodingParity(t);
   testReuseOptimisation(t);
-      testA4C6C4Optimisations(t);
-      testA2B3Optimisations(t);
+  testA4C6C4Optimisations(t);
+  testA2B3Optimisations(t);
   testZoneMapOptimisation(t);
 
   t.summary();

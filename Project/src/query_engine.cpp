@@ -200,9 +200,9 @@ void runQuery(const ColumnStore&              db,
     }
 
     // =================================================================
-    // A2 + B3 FAST PATH — town partitions + month binary-search range
-    // Enabled only when BOTH flags are on. This keeps flag behavior
-    // extensible: either flag alone falls back to the normal scan path.
+    // A2 + B3 FAST PATH 
+    // 1) A2 stores rows in sorted order: Town -> Year -> Month.
+    // 2) B3 uses binary search to jump directly to the month range we want.
     // =================================================================
     if (db.use_presorted_storage && db.use_month_binary_search) {
         const uint32_t start_key = monthKey(target_year, start_month);
@@ -212,6 +212,7 @@ void runQuery(const ColumnStore&              db,
             TownPartition part;
             bool has_part = false;
 
+            // A1 Optimisation: if dict encoding is on, compare town IDs (int==int) instead of full strings
             if (db.use_dict_encoding) {
                 uint16_t tid = 0;
                 if (db.dict_town.lookup(town, tid) &&
@@ -220,6 +221,7 @@ void runQuery(const ColumnStore&              db,
                     part = db.town_partitions_encoded[tid];
                     has_part = true;
                 }
+            // Standard path
             } else {
                 auto it = db.town_partitions.find(town);
                 if (it != db.town_partitions.end() && it->second.valid) {
@@ -230,12 +232,19 @@ void runQuery(const ColumnStore&              db,
 
             if (!has_part) continue;
 
+            // Binary search inside this town partition:
+            // lb = first row with monthKey >= start_key
+            // ub = first row with monthKey >  end_key
+            // Candidate rows are [lb, ub).
             const std::size_t lb = lowerBoundMonthKey(db, part.begin, part.end, start_key);
             const std::size_t ub = upperBoundMonthKey(db, lb, part.end, end_key);
 
             for (std::size_t i = lb; i < ub; ++i) {
+
                 if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
 
+                // C6: cheap integer check before division.
+                // If price > 4725 * area, PPSM must be > 4725, so skip early.
                 if (db.use_int_multiply) {
                     if (static_cast<uint64_t>(db.col_resale_price[i]) >
                         4725ULL * static_cast<uint64_t>(db.col_floor_area[i])) {
@@ -269,8 +278,10 @@ void runQuery(const ColumnStore&              db,
         result.floor_area          = db.col_floor_area[best_i];
         result.price_per_sqm       = min_ppsm;
 
+        // A9: lazy materialisation: read only the winning row from disk
         if (db.use_columnar_files) {
-            // A9: lazy materialisation — read only the winning row from disk
+            // A9: in column-file mode, display columns are not fully loaded.
+            // Read only the winning row from disk (lazy materialisation).
             result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
             result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
             result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
@@ -479,7 +490,7 @@ void runQuery(const ColumnStore&              db,
     result.price_per_sqm = min_ppsm;
 
     if (db.use_columnar_files) {
-        // A9: lazy materialisation — read only the winning row from disk
+        // A9: lazy materialisation : read only the winning row from disk
         result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
         result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
         result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
