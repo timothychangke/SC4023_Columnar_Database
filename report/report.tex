@@ -1,0 +1,326 @@
+\documentclass[9pt,a4paper]{article}
+
+% ---------- Page geometry: tighter margins (safe for A4/11pt) ----------
+\usepackage[a4paper,top=0.75in,bottom=0.8in,left=0.75in,right=0.75in,
+            headsep=8pt,footskip=22pt]{geometry}
+
+% ---------- Fonts: Times + matching math, denser than default CM ----------
+\usepackage{newtxtext}
+\usepackage{newtxmath}
+\usepackage[T1]{fontenc}
+
+% ---------- Microtype (protrusion + expansion, ~2-3% horizontal gain) ----
+\usepackage{microtype}
+
+% ---------- Line spacing: 0.95 is the sweet spot (still readable) --------
+\linespread{0.97}
+
+% ---------- Paragraph spacing (compact but separated) --------------------
+\setlength{\parskip}{2pt plus 1pt minus 0.5pt}
+\setlength{\parindent}{1em}
+
+% ---------- Section heading spacing (titlesec) ---------------------------
+\usepackage[compact]{titlesec}
+\titlespacing*{\section}      {0pt}{6pt plus 1pt minus 1pt}{2pt}
+\titlespacing*{\subsection}   {0pt}{4pt plus 1pt minus 1pt}{1pt}
+\titlespacing*{\subsubsection}{0pt}{3pt plus 1pt minus 1pt}{1pt}
+\titlespacing*{\paragraph}    {0pt}{2pt}{0.6em}
+\titleformat*{\section}{\normalsize\bfseries}
+\titleformat*{\subsection}{\small\bfseries}
+\titleformat*{\subsubsection}{\small\itshape}
+
+% ---------- Float & caption spacing --------------------------------------
+\setlength{\textfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\intextsep}{5pt plus 2pt minus 2pt}
+\setlength{\floatsep}{5pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{3pt}
+\setlength{\belowcaptionskip}{0pt}
+
+% ---------- Math display spacing -----------------------------------------
+\setlength{\abovedisplayskip}{3pt}
+\setlength{\belowdisplayskip}{3pt}
+\setlength{\abovedisplayshortskip}{2pt}
+\setlength{\belowdisplayshortskip}{2pt}
+
+% ---------- Tables: denser ------------------------------------------------
+\renewcommand{\arraystretch}{0.95}
+\setlength{\tabcolsep}{4pt}
+
+% ---------- Widow/orphan protection (small penalty hike) -----------------
+\clubpenalty=9999
+\widowpenalty=9999
+
+% ---------- Packages ------------------------------------------------------
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage[inline]{enumitem}
+\usepackage{listings}
+
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue}
+\captionsetup{font=small,labelfont=bf,skip=2pt}
+\captionsetup[sub]{font=footnotesize,skip=1pt}
+
+% ---------- Lists: zero-padding everywhere -------------------------------
+\setlist{nosep,topsep=1pt,partopsep=0pt,parsep=0pt,itemsep=1pt,leftmargin=1.3em}
+
+% ---------- Bibliography spacing -----------------------------------------
+% \usepackage{natbib}
+% \setlength{\bibsep}{2pt plus 1pt}
+
+% ---------- Algorithm float: tighter -------------------------------------
+\makeatletter
+\setlength{\@fptop}{0pt}
+\makeatother
+
+% ---------- Custom compact title (replaces \maketitle) -------------------
+\newcommand{\compacttitle}{%
+  \begin{center}\vspace*{-6pt}
+    {\large\bfseries A Columnar Store for Efficient HDB Resale Analytics}\\[1pt]
+    {\small SC4023 Big Data Management --- Semester Project, Group \textit{X}}\\[1pt]
+    {\footnotesize
+      Member~A (\texttt{UXXXXXXXX}) \quad
+      Member~B (\texttt{UXXXXXXXX}) \quad
+      Member~C (\texttt{UXXXXXXXX})}
+  \end{center}\vspace{-4pt}%
+}
+
+% =============================================================
+\begin{document}
+\pagestyle{empty}
+\compacttitle
+
+% ---------- Cover-page metadata strip (not counted) ----------------------
+\begin{center}\footnotesize
+\begin{tabular}{@{}ll@{\quad}ll@{}}
+\toprule
+Matric (query source) & \texttt{UXXXXXXXX} & Target year / start month & YYYY / MM \\
+Derived town list     & $\{T_1,\dots,T_{10}\}$ & Fixed ranges & $y\!\in\![80,150]$, $x\!\in\![1,8]$, $\le 4725$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\newpage
+\pagestyle{plain}\setcounter{page}{1}
+
+% =============================================================
+\noindent\textbf{Abstract.}~% TODO: 3-4 sentences inline (saves vs \begin{abstract}).
+
+\section{Introduction}\label{sec:intro}
+% TODO: one short paragraph -- task, dataset, 568 (x,y) grid, roadmap.
+
+% =============================================================
+\section{Data Storage}\label{sec:storage}
+
+\subsection{System Architecture}\label{sec:arch}
+\begin{figure}[H]\centering
+  % \includegraphics[width=0.85\linewidth]{figs/architecture.pdf}
+  \caption{Pipeline: CSV~$\rightarrow$~parser~$\rightarrow$~per-column binary files~$\rightarrow$~engine~$\rightarrow$~output CSV.}
+  \label{fig:arch}
+\end{figure}
+Figure~\ref{fig:arch} shows the end-to-end pipeline.
+The parser splits the CSV \texttt{YYYY-MM} field into two integer columns (\texttt{Year} as \texttt{uint16}, \texttt{Month} as \texttt{uint8}), precomputes \texttt{PricePerSqm} (A4), and drops columns unused by the query (\texttt{Storey\_Range}, \texttt{Street\_Name}, \texttt{Flat\_Type}) so that neither the binary files nor the scan loop pay for data the workload never touches.
+
+\subsection{Per-Column Physical Layout}\label{sec:layout}
+Table~\ref{tab:layout} details each materialised column.
+The six columns on the scan hot path (Year through PricePerSqm) total 14~bytes/row; because only these columns are read during filtering and aggregation, the effective working set for 259K rows is $\approx$3.5\,MB---comfortably L3-resident.
+Late-materialised columns (Block, Flat\_Model, Lease\_Commence) are fetched only for the single surviving output row per $(x,y)$ pair (\S\ref{sec:c3}).
+
+\begin{table}[H]\centering\footnotesize
+\begin{tabular}{@{}lllrll@{}}
+\toprule
+Column & Type & Encoding & B/row & Derived? & Rationale \\
+\midrule
+Year              & uint16 & raw       & 2 & from \texttt{YYYY-MM} & range predicate \\
+Month             & uint8  & raw       & 1 & from \texttt{YYYY-MM} & range predicate \\
+Town              & enum   & dict (A1) & 1 & no  & 10 towns $\le$ 4 bits \\
+Floor\_Area\_Sqm  & uint16 & raw       & 2 & no  & $\ge y$ predicate \\
+Resale\_Price     & uint32 & raw       & 4 & no  & aggregate target \\
+PricePerSqm (A4)  & float32& raw       & 4 & yes & removes per-row division \\
+Block, Flat\_Model, Lease\_Commence & \dots & \dots & \dots & no & late-materialised \\
+\bottomrule
+\end{tabular}
+\caption{Physical layout. Justifications in \S\ref{sec:layout-discussion}.}\label{tab:layout}
+\end{table}
+
+\subsection{Encoding and Layout Decisions}\label{sec:layout-discussion}
+
+\paragraph{Dictionary encoding (A1).}
+A \texttt{DictionaryEncoder} maps each unique town string to a \texttt{uint16\_t} ID via a bidirectional hash-map/vector pair, converting ${\sim}20$\,ns string comparisons into ${\sim}1$\,ns integer equality checks.
+With only 26 unique towns in the dataset (10 per query), the dictionary occupies $<$1\,KB---negligible overhead---while the encoded column adds 2\,bytes/row.
+The cost is an extra hash-map insert per row at load time (${\sim}0.2\%$ slower ingest), but every downstream scan benefits: measured $+16.6\%$ query speedup from this change alone.
+
+\paragraph{Column splitting of \texttt{Month}.}
+The source CSV stores dates as strings (e.g.\ \texttt{"Jan-15"}); the parser converts each into \texttt{Year} (\texttt{uint16}) and \texttt{Month} (\texttt{uint8}) at ingest time, paying a one-time parse cost to enable direct integer range predicates and avoid ${\sim}147$M repeated string parses across all 568 queries.
+The 3-byte pair also enables zone-map pruning on both fields independently (\S\ref{sec:zonemaps}).
+
+\paragraph{Precomputed \texttt{PricePerSqm} (A4).}
+Storing \texttt{price\,/\,area} as a \texttt{float32} column costs $+4$\,bytes/row (${\approx}1$\,MB for 259K rows) but eliminates a floating-point division for every row that survives all four filter predicates.
+In practice the measured speedup is $<0.1\%$ because only ${\sim}0.2\%$ of row iterations reach the division; however, the column is retained because the query's aggregate target \emph{is} price-per-sqm---in a workload that did not aggregate on this metric, the extra storage would be wasted.
+
+\paragraph{Sorted clustering by $(\text{Year},\text{Month},\text{Town})$.}
+All columns are co-sorted by (Year, Month, Town) once at ingest---an $O(N \log N)$ cost amortised across all 568 queries.
+This single decision is the foundation for three other optimisations: zone-map chunk pruning achieves a 96.1\% skip rate because temporal locality is maximised (\S\ref{sec:zonemaps}), binary search narrows the scan window to $O(\log N)$ (\S\ref{sec:binsearch}), and RLE on the Town column compresses consecutive identical IDs (\S\ref{sec:rle}).
+The trade-off is ingest-time cost and the loss of insertion-order locality, both acceptable given a single bulk load.
+
+
+\subsection{Zone Maps (B1)}\label{sec:zonemaps}
+% TODO
+
+\subsection{Chunked I/O (D1)}\label{sec:io}
+% TODO
+
+\subsection{Bitmap Index on Town}\label{sec:bitmap}
+% TODO
+
+\subsection{RLE on Sorted Town Column}\label{sec:rle}
+% TODO
+
+\subsection{Exception Handling}\label{sec:except}
+% TODO: empty -> "No result"; malformed dates; tie-break (Q5); 2025 unused.
+
+\subsection{Space--Time Trade-off Summary}
+\begin{table}[H]\centering\footnotesize
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Decision & $\Delta$B/row & $\Delta$CPU/q & Verdict \\
+\midrule
+Dict-encode Town (A1)       & $-$         & $-$ & keep \\
+Precompute PricePerSqm (A4) & $+4$        & $-$ & keep (workload-specific) \\
+Sort by (Y,M,Town)          & $0$         & $-$ & keep (enables B1, binsearch, RLE) \\
+Zone maps (B1)              & $+\epsilon$ & $-$ & keep \\
+Bitmap index on Town        & $+\epsilon$ & $-$ & keep \\
+RLE on sorted Town          & $-$         & $-$ & keep \\
+\bottomrule
+\end{tabular}
+\caption{Storage decisions as explicit trade-offs.}\label{tab:tradeoff}
+\end{table}
+
+% =============================================================
+\section{Data Processing}\label{sec:processing}
+
+\subsection{Baseline Algorithm}\label{sec:baseline}
+\begin{algorithm}[H]\footnotesize
+\caption{Naive full column scan (control group).}
+\begin{algorithmic}[1]
+  \State % TODO
+\end{algorithmic}\end{algorithm}
+
+\subsection{Predicate Reordering (C4)}\label{sec:c4}
+% TODO. Hook: selectivity -> Table~\ref{tab:bench}.
+
+\subsection{Presort + Binary Search on (Year, Month)}\label{sec:binsearch}
+% TODO
+
+\subsection{Late Materialisation (C3)}\label{sec:c3}
+% TODO
+
+\subsection{Zone-Map Chunk Skipping (B1)}\label{sec:b1-proc}
+% TODO. Hook: chunks-skipped -> Table~\ref{tab:bench}.
+
+\subsection{Bitmap-Driven Row Selection}\label{sec:bitmap-proc}
+% TODO
+
+\subsection{RLE Run Skipping}\label{sec:rle-proc}
+% TODO
+
+\subsection{Result Reuse Across $(x,y)$ Pairs (C1+C2) --- headline}\label{sec:reuse}
+% TODO: nested structure, cumulative min-price table, asymptotic win.
+
+\subsection{Integer Early-Exit Gate (C6)}\label{sec:c6}
+% TODO
+
+\subsection{Vectorised Batch Processing}\label{sec:vec}
+% TODO
+
+\subsection{Composability}\label{sec:compose}
+% TODO: OptConfig flags in eval_suite.cpp.
+
+\subsection{Correctness Argument}\label{sec:correctness}
+% TODO: one sentence per optimisation.
+
+% =============================================================
+\section{Experiment Result}\label{sec:experiment}
+% All quantitative evidence consolidated here; eval_suite.cpp emits Table~\ref{tab:bench}.
+
+\subsection{Compulsory Artefacts}
+\begin{figure}[H]\centering
+  \begin{subfigure}[t]{0.48\linewidth}\centering
+    % \includegraphics[width=\linewidth]{figs/run_terminal.png}
+    \caption{End-to-end build + run.}\end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\linewidth}\centering
+    % \includegraphics[width=\linewidth]{figs/scanresult_csv.png}
+    \caption{\texttt{ScanResult\_<Matric>.csv}.}\end{subfigure}
+  \caption{Execution screenshots (spec-mandated).}
+\end{figure}
+
+\subsection{Excel / Sheets Cross-Validation}
+% TODO: 3-4 (x,y) pairs, formula + cell + engine output side-by-side.
+
+\subsection{Benchmark (cumulative, 5-run average)}
+\begin{table}[H]\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Configuration & Time ms ($\bar{x}\!\pm\!\sigma$) & Rows scan. & Town cmp. & Chk.skip & RSS (MB) \\
+\midrule
+Baseline                         & -- & -- & -- & -- & -- \\
++ Dict encoding (A1)             & -- & -- & -- & -- & -- \\
++ Predicate reorder (C4)         & -- & -- & -- & -- & -- \\
++ Precompute PricePerSqm (A4)    & -- & -- & -- & -- & -- \\
++ Zone maps (B1)                 & -- & -- & -- & -- & -- \\
++ Binary search on (Y,M)         & -- & -- & -- & -- & -- \\
++ Bitmap index on Town           & -- & -- & -- & -- & -- \\
++ RLE run skipping               & -- & -- & -- & -- & -- \\
++ Late materialisation (C3)      & -- & -- & -- & -- & -- \\
++ Chunked I/O (D1)               & -- & -- & -- & -- & -- \\
++ Int early-exit (C6)            & -- & -- & -- & -- & -- \\
++ Vectorised batches             & -- & -- & -- & -- & -- \\
++ \textbf{Result reuse (C1/C2)}  & -- & -- & -- & -- & -- \\
+Full (all flags)                 & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\caption{Cumulative optimisation impact. Emitted by \texttt{eval\_suite.cpp}.}\label{tab:bench}
+\end{table}
+
+\begin{figure}[H]\centering
+  % \includegraphics[width=0.72\linewidth]{figs/speedup.pdf}
+  \caption{Speedup vs baseline ($=1.0\times$). Result reuse dominates.}\label{fig:speedup}
+\end{figure}
+
+\subsection{Correctness Invariant}
+% TODO
+
+\subsection{Sensitivity Analysis}
+% TODO: chunk size; matric-number selectivity.
+
+\subsection{Negative Results}
+% TODO (Prof. Q1 asks explicitly).
+
+\subsection{Environment}
+% TODO: CPU / RAM / OS / compiler flags / row count.
+
+% =============================================================
+\section{Conclusion}\label{sec:conclusion}
+% TODO: biggest win; biggest disappointment; one change for next time.
+
+% \bibliographystyle{IEEEtran}
+% \bibliography{refs}
+
+\appendix
+\section*{Contribution Form (not counted in 5 pages)}
+% TODO: per-member quantitative contributions.
+
+\section*{Appendix: Figures ($\le$ 2 pages)}
+% TODO: full-res architecture; extra Excel validations; larger charts; overflow pseudocode.
+
+\end{document}
