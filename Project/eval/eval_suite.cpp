@@ -23,14 +23,17 @@
  */
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -43,6 +46,37 @@
 // =============================================================================
 // Performance counters (global, reset before each config run)
 // =============================================================================
+class TeeBuf : public std::streambuf {
+public:
+    TeeBuf(std::streambuf* first, std::streambuf* second)
+        : first_(first), second_(second) {}
+
+protected:
+    int overflow(int ch) override {
+        if (ch == traits_type::eof()) {
+            return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
+        }
+
+        const int r1 = first_ ? first_->sputc(static_cast<char>(ch)) : traits_type::not_eof(ch);
+        const int r2 = second_ ? second_->sputc(static_cast<char>(ch)) : traits_type::not_eof(ch);
+        if (traits_type::eq_int_type(r1, traits_type::eof()) ||
+            traits_type::eq_int_type(r2, traits_type::eof())) {
+            return traits_type::eof();
+        }
+        return ch;
+    }
+
+    int sync() override {
+        const int s1 = first_ ? first_->pubsync() : 0;
+        const int s2 = second_ ? second_->pubsync() : 0;
+        return (s1 == 0 && s2 == 0) ? 0 : -1;
+    }
+
+private:
+    std::streambuf* first_;
+    std::streambuf* second_;
+};
+
 namespace perf {
     uint64_t rows_scanned     = 0;  // total row iterations across all queries
     uint64_t town_comparisons = 0;  // town predicate comparisons (string or int)
@@ -71,6 +105,8 @@ struct OptConfig {
     bool int_multiply;          // C6
     bool predicate_reorder;     // C4
     bool zone_maps;             // B1
+    bool presorted_storage;     // A2
+    bool month_binary_search;   // B3
     bool late_materialise;      // C3
     bool columnar_files;        // A9
     bool        chunked_io      = false;  // D1
@@ -83,13 +119,55 @@ struct OptConfig {
         db.use_precomputed_ppsm  = precompute_ppsm;
         db.use_int_multiply      = int_multiply;
         db.use_predicate_reorder = predicate_reorder;
-        db.use_zone_maps = zone_maps;
+        db.use_zone_maps         = zone_maps;
+        db.use_presorted_storage = presorted_storage;
+        db.use_month_binary_search = month_binary_search;
         db.use_late_materialise = late_materialise;
         db.use_columnar_files = columnar_files;
         db.use_chunked_io      = chunked_io;
         db.memory_budget_bytes = memory_budget_mb * 1024 * 1024;
     }
 };
+
+namespace {
+inline uint32_t monthKey(uint16_t year, uint8_t month) {
+    return static_cast<uint32_t>(year) * 12u + static_cast<uint32_t>(month - 1u);
+}
+
+inline uint32_t monthKeyAt(const ColumnStore& db, std::size_t idx) {
+    return monthKey(db.col_month_year[idx], db.col_month_month[idx]);
+}
+
+std::size_t lowerBoundMonthKey(const ColumnStore& db,
+                               std::size_t l,
+                               std::size_t r,
+                               uint32_t key) {
+    while (l < r) {
+        const std::size_t mid = l + (r - l) / 2;
+        if (monthKeyAt(db, mid) < key) {
+            l = mid + 1;
+        } else {
+            r = mid;
+        }
+    }
+    return l;
+}
+
+std::size_t upperBoundMonthKey(const ColumnStore& db,
+                               std::size_t l,
+                               std::size_t r,
+                               uint32_t key) {
+    while (l < r) {
+        const std::size_t mid = l + (r - l) / 2;
+        if (monthKeyAt(db, mid) <= key) {
+            l = mid + 1;
+        } else {
+            r = mid;
+        }
+    }
+    return l;
+}
+} // namespace
 
 // =============================================================================
 // Memory estimation
@@ -219,6 +297,50 @@ static void runQueryInstrumented(
         }
     }
 
+    // A2+B3 fast path counting model: range scans inside town partitions.
+    if (db.use_presorted_storage && db.use_month_binary_search) {
+        const uint32_t start_key = monthKey(target_year, start_month);
+        const uint32_t end_key   = monthKey(target_year, end_month);
+
+        for (const auto& town : towns) {
+            TownPartition part;
+            bool has_part = false;
+
+            if (db.use_dict_encoding) {
+                uint16_t tid = 0;
+                if (db.dict_town.lookup(town, tid) &&
+                    tid < db.town_partitions_encoded.size() &&
+                    db.town_partitions_encoded[tid].valid) {
+                    part = db.town_partitions_encoded[tid];
+                    has_part = true;
+                }
+            } else {
+                auto it = db.town_partitions.find(town);
+                if (it != db.town_partitions.end() && it->second.valid) {
+                    part = it->second;
+                    has_part = true;
+                }
+            }
+
+            if (!has_part) continue;
+
+            const std::size_t lb = lowerBoundMonthKey(db, part.begin, part.end, start_key);
+            const std::size_t ub = upperBoundMonthKey(db, lb, part.end, end_key);
+
+            for (std::size_t i = lb; i < ub; ++i) {
+                ++local_rows;
+                if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+                ++local_passed;
+            }
+        }
+
+        perf::rows_scanned += local_rows;
+        perf::town_comparisons += local_town_cmp;
+        perf::rows_passed += local_passed;
+        if (!result.no_result) ++perf::queries_valid;
+        return;
+    }
+
     for (std::size_t i = 0; i < N; ++i) {
         ++local_rows;
 
@@ -319,8 +441,9 @@ static BenchmarkResult runBenchmark(
     if (config.columnar_files) {
         // Use a config-specific directory so different flag combos don't clash
         std::string col_dir = "data/columns";
-        if (config.dict_encoding)   col_dir += "_dict";
-        if (config.precompute_ppsm) col_dir += "_ppsm";
+        if (config.dict_encoding)    col_dir += "_dict";
+        if (config.precompute_ppsm)  col_dir += "_ppsm";
+        if (config.presorted_storage) col_dir += "_a2";
         db.column_dir = col_dir;
 
         std::cout << "  [A9] column_dir = " << db.column_dir << "\n";
@@ -334,6 +457,7 @@ static BenchmarkResult runBenchmark(
             ColumnStore tmp;
             tmp.use_dict_encoding    = config.dict_encoding;
             tmp.use_precomputed_ppsm = config.precompute_ppsm;
+            tmp.use_presorted_storage = config.presorted_storage;
             loadCSV(csv_path, tmp);
             writeColumnFiles(tmp, db.column_dir);
             std::cout << "  [A9] Column files written to " << db.column_dir << "\n";
@@ -544,13 +668,37 @@ static std::string formatCount(uint64_t n) {
 int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0]
-                  << " <path_to_csv> <MatriculationNumber> [num_runs=5]\n";
+                  << " <path_to_csv> <MatriculationNumber> [num_runs=5] [output_file]\n";
         return 1;
     }
 
     const std::string csv_path = argv[1];
     const std::string matric   = argv[2];
     const int num_runs = (argc >= 4) ? std::atoi(argv[3]) : 5;
+    const std::string output_file =
+        (argc >= 5) ? ("results/" + std::string(argv[4])) : ("results/EvalResult_" + matric + ".txt");
+
+    {
+        std::filesystem::path out_path(output_file);
+        if (out_path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(out_path.parent_path(), ec);
+            if (ec) {
+                std::cerr << "Failed to create output directory: "
+                          << out_path.parent_path().string() << " (" << ec.message() << ")\n";
+                return 1;
+            }
+        }
+    }
+
+    std::ofstream out(output_file);
+    if (!out.is_open()) {
+        std::cerr << "Failed to open eval output file: " << output_file << "\n";
+        return 1;
+    }
+    TeeBuf tee_buf(std::cout.rdbuf(), out.rdbuf());
+    std::streambuf* original_cout = std::cout.rdbuf(&tee_buf);
+    std::cerr << "Eval output will be written to: " << output_file << "\n";
 
     std::cout << "========================================\n";
     std::cout << "  HDB Column Store – Evaluation Suite\n";
@@ -565,38 +713,48 @@ int main(int argc, char* argv[]) {
     // compared against the first entry (baseline).
     // =====================================================================
     std::vector<OptConfig> configs = {
-        //                                                                                        A1     C1/C2  A4     C6     C4     B1
-        { "Baseline",                                                                            false, false, false, false, false, false, false, false },
-        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false, false, false },
-        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false, false, false },
-        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false, false, false },
-        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false, false, false },
-        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false, false, false },
-        { "C4: Predicate Reorder",                                                               false, false, false, false, true, false, false, false },
-        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true, false, false, false },
-        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true, false, false, false },
-        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true, false, false, false },
-        { "B1: Zone Maps",                                                                       false, false, false, false, false, true, false, false },
-        { "A1+B1: Dict + ZoneMaps",                                                              true, false, false, false, false, true, false, false },
-        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true, true, true, true, false, false},
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     B3     C3     A9
+        { "Baseline",                                                                            false, false, false, false, false, false, false, false, false, false },
+        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false, false, false, false, false },
+        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false, false, false, false, false },
+        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false, false, false, false, false },
+        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false, false, false, false, false },
+        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false, false, false, false, false },
+        { "C4: Predicate Reorder",                                                               false, false, false, false, true,  false, false, false, false, false },
+        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true,  false, false, false, false, false },
+        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true,  false, false, false, false, false },
+        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true,  false, false, false, false, false },
+        { "B1: Zone Maps",                                                                       false, false, false, false, false, true,  false, false, false, false },
+        { "A1+B1: Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false, false, false },
+        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true,  true,  true,  true,  false, false, false, false },
         //  have no effect, but proves no conflict
-        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true, false, false, false,  true, false, false },
-        { "C3: Late Materialise",                                                                false, false, false, false, false, false, true, false },
-        { "A1+C3: Dict+LateMat",                                                                 true,  false, false, false, false, false, true, false },
-        { "A1+C3+C4: Dict+LateMat+PredReorder",                                                  true,  false, false, false, true,  false, true, false },
-        { "A1+A4+C3+C4+C6: All Scan Opts",                                                       true,  false, true,  true,  true,  false, true, false },
-        { "A1+A4+C3+C4+C6+B1: All Scan+ZoneMaps",                                                true,  false, true,  true,  true,  true,  true, false },
-        { "A9: Columnar Files",                                                                  false, false, false, false, false, false, false, true },
-        { "A9+A1: Columnar+Dict",                                                                true,  false, false, false, false, false, false, true },
-        { "A9+A1+A4+C6+C4+B1: ColAll",                                                           true,  false, true,  true,  true,  true,  false, true },
-        { "A9+C1C2: Columnar+Reuse",                                                             false, true,  false, false, false, false, false, true },
-        { "A9+All: Everything",                                                                  true,  true,  true,  true,  true,  true,  true,  true },
-        { "D1: Chunked I/O 50MB",                                                                true, false, true, true, true, true, false, true, /*chunked_io=*/true, /*budget_mb=*/50 },
-        { "D1: Chunked I/O 10MB",                                                                true, false, true, true, true, true, false, true, true, 10 },
-        { "D1: Chunked I/O 5MB",                                                                 true, false, true, true, true, true, false, true, true, 5 },
-        { "D1: Chunked I/O 2MB",                                                                 true, false, true, true, true, true, false, true, true, 2 },
-        { "D1: Chunked I/O 1MB",                                                                 true, false, true, true, true, true, false, true, true, 1 },
-        { "D1+C3: Chunked + Late Mat",                                                           true, false, true, true, true, true, true,  true, true, 50 },
+        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true,  false, false, false, true,  false, false, false, false },
+        { "C3: Late Materialise",                                                                false, false, false, false, false, false, false, false, true,  false },
+        { "A1+C3: Dict+LateMat",                                                                 true,  false, false, false, false, false, false, false, true,  false },
+        { "A1+C3+C4: Dict+LateMat+PredReorder",                                                  true,  false, false, false, true,  false, false, false, true,  false },
+        { "A1+A4+C3+C4+C6: All Scan Opts",                                                       true,  false, true,  true,  true,  false, false, false, true,  false },
+        { "A1+A4+C3+C4+C6+B1: All Scan+ZoneMaps",                                                true,  false, true,  true,  true,  true,  false, false, true,  false },
+
+        { "A9: Columnar Files",                                                                  false, false, false, false, false, false, false, false, false, true  },
+        { "A9+A1: Columnar+Dict",                                                                true,  false, false, false, false, false, false, false, false, true  },
+        { "A9+A1+A4+C6+C4+B1: ColAll",                                                           true,  false, true,  true,  true,  true,  false, false, false, true  },
+        { "A9+C1C2: Columnar+Reuse",                                                             false, true,  false, false, false, false, false, false, false, true  },
+        { "A9+All: Everything",                                                                  true,  true,  true,  true,  true,  true,  true,  true,  true,  true  },
+
+        { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  /*chunked_io=*/true, /*budget_mb=*/50 },
+        { "D1: Chunked I/O 10MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true, 10 },
+        { "D1: Chunked I/O 5MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 5  },
+        { "D1: Chunked I/O 2MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 2  },
+        { "D1: Chunked I/O 1MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 1  },
+        { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, true,  true,  true, 50 },
+
+        { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false },
+        { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, true,  false, false },
+        { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  true,  false, false },
+        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  true,  false, false },
+        { "A2+B3+A4+C6: Pre-sorted + Month Binary Search + Precompute PPSM + Int Multiply",    false, false, true,  true,  false, false, true,  true,  false, false },
+        { "A9+A2+B3+A4+C6: ColFile+Presort+MonthBSearch+PPSM+IntMul",                            false, false, true,  true,  false, false, true,  true,  false, true  },
+        { "A9+A2+B3: ColFile+Presort+MonthBSearch",                                              false, false, false, false, false, false, true,  true,  false, true  },
     };
 
     // =====================================================================
@@ -782,5 +940,9 @@ int main(int argc, char* argv[]) {
     std::cout << "  OVERALL: " << (all_correct ? "ALL CONFIGS CORRECT" : "SOME CONFIGS FAILED")
               << "\n========================================\n";
 
-    return all_correct ? 0 : 1;
+    const int exit_code = all_correct ? 0 : 1;
+    std::cout.flush();
+    std::cout.rdbuf(original_cout);
+    std::cerr << "Eval report written to: " << output_file << "\n";
+    return exit_code;
 }

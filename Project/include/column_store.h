@@ -100,6 +100,12 @@ struct MinEntry {
     std::size_t idx = 0; 
 };
 
+struct TownPartition {
+    std::size_t begin = 0; // inclusive
+    std::size_t end   = 0; // exclusive
+    bool valid = false;
+};
+
 
 // ─── Zone Map structures (B1) ───
 
@@ -282,6 +288,22 @@ struct ColumnStore {
     ZoneMap zm_resale_price;     // used for: price/sqm <= 4725 (via price <= 4725*area)
     ZoneMap zm_month_year;       // used for: year == target_year
     ZoneMap zm_month_month;      // used for: month in [start, end]
+
+    // === A2: Pre-sorted Storage (Town, then Year/Month) ===
+    // Reorders all columns with one shared permutation so row alignment is preserved.
+    // This makes each town contiguous and month-ordered inside that town partition.
+    bool use_presorted_storage = false;
+
+    // Town partition metadata generated when use_presorted_storage is enabled.
+    // string path
+    std::unordered_map<std::string, TownPartition> town_partitions;
+    // dictionary path (index = town_id)
+    std::vector<TownPartition> town_partitions_encoded;
+
+    // === B3: Sorted Index on Month (Binary Search) ===
+    // When enabled together with use_presorted_storage, query execution uses
+    // binary search over month range within each town partition.
+    bool use_month_binary_search = false;
 
     // helper methods
     

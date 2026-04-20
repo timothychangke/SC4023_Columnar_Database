@@ -278,6 +278,39 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
         readNumericCol(db.col_price_per_sqm, "price_per_sqm.col");
     }
 
+    // A2: rebuild town partitions from loaded columns.
+    // Column files may be pre-sorted (Town -> Year -> Month); when they are,
+    // this metadata enables the A2+B3 fast path in runQuery().
+    db.town_partitions.clear();
+    db.town_partitions_encoded.clear();
+    if (db.use_presorted_storage) {
+        if (db.use_dict_encoding) {
+            db.town_partitions_encoded.resize(db.dict_town.size());
+
+            std::size_t i = 0;
+            while (i < N) {
+                const uint16_t tid = db.col_town_encoded[i];
+                const std::size_t begin = i;
+                while (i < N && db.col_town_encoded[i] == tid) ++i;
+                const std::size_t end = i;
+
+                if (tid < db.town_partitions_encoded.size()) {
+                    db.town_partitions_encoded[tid] = TownPartition{begin, end, true};
+                    db.town_partitions[db.dict_town.decode(tid)] = TownPartition{begin, end, true};
+                }
+            }
+        } else {
+            std::size_t i = 0;
+            while (i < N) {
+                const std::string town = db.col_town[i];
+                const std::size_t begin = i;
+                while (i < N && db.col_town[i] == town) ++i;
+                const std::size_t end = i;
+                db.town_partitions[town] = TownPartition{begin, end, true};
+            }
+        }
+    }
+
     // ── Materialisation columns are NOT loaded here ──
     // block, flat_model, lease_commence_date, street_name, flat_type,
     // storey_range will be loaded lazily for just the winning row index
@@ -335,6 +368,9 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
     std::cout << "  Columns loaded: month_year, month_month, floor_area, resale_price"
               << (db.use_dict_encoding ? ", town_encoded" : ", town")
               << (db.use_precomputed_ppsm ? ", price_per_sqm" : "") << "\n";
+    if (db.use_presorted_storage) {
+        std::cout << "  Town partitions rebuilt: " << db.town_partitions.size() << "\n";
+    }
     std::cout << "  Materialisation columns: deferred (lazy load)\n";
 }
 

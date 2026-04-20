@@ -7,8 +7,16 @@
 #   make run      — build and run with a default matric number (for quick testing)
 # =============================================================================
 
+.PHONY: run test eval clean
+
 CXX      := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -Iinclude
+
+ifeq ($(OS),Windows_NT)
+CLEAN_CMD := del /Q /F main.o src\column_store.o src\csv_parser.o src\query_engine.o src\output_writer.o src\column_file_io.o column_store.exe column_store test_runner.exe test_runner eval_runner.exe eval_runner 2>nul
+else
+CLEAN_CMD := rm -f $(OBJS) $(TARGET) test_runner eval_runner
+endif
 
 # Output executable name
 TARGET   := column_store
@@ -18,7 +26,8 @@ SRCS     := main.cpp \
             src/column_store.cpp \
             src/csv_parser.cpp   \
             src/query_engine.cpp \
-            src/output_writer.cpp
+            src/output_writer.cpp \
+            src/column_file_io.cpp
 
 # Derive object file names (placed alongside their sources)
 OBJS     := $(SRCS:.cpp=.o)
@@ -44,13 +53,25 @@ test:
 		src/csv_parser.cpp \
 		src/query_engine.cpp \
 		src/output_writer.cpp \
+		src/column_file_io.cpp \
 		-o test_runner
 	@echo "Test build successful: test_runner"
 	./test_runner
 
+# Build and run evaluation suite
+eval:
+	$(CXX) $(CXXFLAGS) \
+		eval/eval_suite.cpp \
+		src/column_store.cpp \
+		src/csv_parser.cpp \
+		src/query_engine.cpp \
+		src/output_writer.cpp \
+		src/column_file_io.cpp \
+		-o eval_runner
+	@echo "Eval build successful: eval_runner"
+	./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5
+
 # Remove build artifacts
 clean:
-	rm -f $(OBJS) $(TARGET) test_runner
+	$(CLEAN_CMD)
 	@echo "Cleaned."
-
-.PHONY: run clean test

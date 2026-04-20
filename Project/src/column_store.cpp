@@ -24,6 +24,19 @@ void ColumnStore::clear() {
     col_lease_commence_date.clear();
     col_resale_price.clear();
     col_price_per_sqm.clear();
+
+    col_town_encoded.clear();
+    col_flat_type_encoded.clear();
+    col_flat_model_encoded.clear();
+    col_street_name_encoded.clear();
+
+    dict_town.clear();
+    dict_flat_type.clear();
+    dict_flat_model.clear();
+    dict_street_name.clear();
+
+    town_partitions.clear();
+    town_partitions_encoded.clear();
     
     // zone maps
     zm_floor_area.chunks.clear();

@@ -17,12 +17,15 @@
 
 #include "csv_parser.h"
 
+#include <algorithm>
 #include <array>
 #include <climits>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
+#include <type_traits>
 
 // low level parsing utilities
 
@@ -302,6 +305,107 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
                   << " FlatModel=" << db.dict_flat_model.size()
                   << " StreetName=" << db.dict_street_name.size() << "\n";
     }
+
+    // === A2: Pre-sorted Storage (Town, then Year/Month) ===
+    // Important: apply ONE row permutation to ALL columns to preserve alignment.
+    if (db.use_presorted_storage) {
+        const std::size_t N = db.size();
+        std::vector<std::size_t> perm(N);
+        std::iota(perm.begin(), perm.end(), 0);
+
+        if (db.use_dict_encoding) {
+            std::stable_sort(perm.begin(), perm.end(), [&](std::size_t a, std::size_t b) {
+                const uint16_t ta = db.col_town_encoded[a];
+                const uint16_t tb = db.col_town_encoded[b];
+                if (ta != tb) return ta < tb;
+
+                const uint16_t ya = db.col_month_year[a];
+                const uint16_t yb = db.col_month_year[b];
+                if (ya != yb) return ya < yb;
+
+                return db.col_month_month[a] < db.col_month_month[b];
+            });
+        } else {
+            std::stable_sort(perm.begin(), perm.end(), [&](std::size_t a, std::size_t b) {
+                const std::string& ta = db.col_town[a];
+                const std::string& tb = db.col_town[b];
+                if (ta != tb) return ta < tb;
+
+                const uint16_t ya = db.col_month_year[a];
+                const uint16_t yb = db.col_month_year[b];
+                if (ya != yb) return ya < yb;
+
+                return db.col_month_month[a] < db.col_month_month[b];
+            });
+        }
+
+        auto reorderByPerm = [&](auto& col) {
+            using T = typename std::decay<decltype(col[0])>::type;
+            std::vector<T> reordered;
+            reordered.reserve(N);
+            for (std::size_t i = 0; i < N; ++i) {
+                reordered.push_back(std::move(col[perm[i]]));
+            }
+            col = std::move(reordered);
+        };
+
+        if (N > 0) {
+            reorderByPerm(db.col_month_year);
+            reorderByPerm(db.col_month_month);
+            reorderByPerm(db.col_town);
+            reorderByPerm(db.col_block);
+            reorderByPerm(db.col_street_name);
+            reorderByPerm(db.col_flat_type);
+            reorderByPerm(db.col_flat_model);
+            reorderByPerm(db.col_storey_range);
+            reorderByPerm(db.col_floor_area);
+            reorderByPerm(db.col_lease_commence_date);
+            reorderByPerm(db.col_resale_price);
+            if (db.use_precomputed_ppsm) {
+                reorderByPerm(db.col_price_per_sqm);
+            }
+            if (db.use_dict_encoding) {
+                reorderByPerm(db.col_town_encoded);
+                reorderByPerm(db.col_flat_type_encoded);
+                reorderByPerm(db.col_flat_model_encoded);
+                reorderByPerm(db.col_street_name_encoded);
+            }
+        }
+
+        // Build partition metadata for town-contiguous layout.
+        db.town_partitions.clear();
+        db.town_partitions_encoded.clear();
+
+        if (db.use_dict_encoding) {
+            db.town_partitions_encoded.resize(db.dict_town.size());
+
+            std::size_t i = 0;
+            while (i < N) {
+                const uint16_t tid = db.col_town_encoded[i];
+                const std::size_t begin = i;
+                while (i < N && db.col_town_encoded[i] == tid) ++i;
+                const std::size_t end = i;
+
+                if (tid < db.town_partitions_encoded.size()) {
+                    db.town_partitions_encoded[tid] = TownPartition{begin, end, true};
+                    db.town_partitions[db.dict_town.decode(tid)] = TownPartition{begin, end, true};
+                }
+            }
+        } else {
+            std::size_t i = 0;
+            while (i < N) {
+                const std::string town = db.col_town[i];
+                const std::size_t begin = i;
+                while (i < N && db.col_town[i] == town) ++i;
+                const std::size_t end = i;
+                db.town_partitions[town] = TownPartition{begin, end, true};
+            }
+        }
+
+        std::cout << "A2 pre-sort complete: records sorted by Town->Year->Month.\n";
+        std::cout << "  Town partitions built: " << db.town_partitions.size() << "\n";
+    }
+
     std::cout << "---------------------------------------------------\n";
 
     // === Zone Map Construction (B1) ===
