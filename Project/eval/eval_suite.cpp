@@ -117,6 +117,7 @@ struct OptConfig {
     std::size_t memory_budget_mb = 50;    // D1
     bool bitmap_index_town = false; // B2
     bool        mmap_io         = false;  // D2
+    bool        town_partitioning = false; // E1
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
@@ -134,6 +135,7 @@ struct OptConfig {
         db.use_chunked_io      = chunked_io;
         db.memory_budget_bytes = memory_budget_mb * 1024 * 1024;
         db.use_mmap_io         = mmap_io;
+        db.use_town_partitioning = town_partitioning;
     }
 };
 
@@ -313,6 +315,10 @@ static void runQueryInstrumented(
     uint64_t local_town_cmp = 0;
     uint64_t local_passed = 0;
 
+    // E1: when town_partitioning is on, the loaded data is already
+    // pre-filtered — no town comparisons happen in the scan path.
+    const bool e1_skip_town = db.use_town_partitioning;
+
     // pre-resolve town IDs if dict encoding is on
     std::vector<uint16_t> town_ids;
     std::vector<bool> town_mask;
@@ -401,20 +407,22 @@ static void runQueryInstrumented(
             // C4 ON: Town → Year → Month
             if (use_bitmap_count) {
                 if (!town_mask[i]) continue;
-            } else if (db.use_dict_encoding) {
-                bool match = false;
-                for (const auto& tid : town_ids) {
-                    ++local_town_cmp;
-                    if (db.col_town_encoded[i] == tid) { match = true; break; }
+            } else if (!e1_skip_town) {
+                if (db.use_dict_encoding) {
+                    bool match = false;
+                    for (const auto& tid : town_ids) {
+                        ++local_town_cmp;
+                        if (db.col_town_encoded[i] == tid) { match = true; break; }
+                    }
+                    if (!match) continue;
+                } else {
+                    bool match = false;
+                    for (const auto& t : towns) {
+                        ++local_town_cmp;
+                        if (db.col_town[i] == t) { match = true; break; }
+                    }
+                    if (!match) continue;
                 }
-                if (!match) continue;
-            } else {
-                bool match = false;
-                for (const auto& t : towns) {
-                    ++local_town_cmp;
-                    if (db.col_town[i] == t) { match = true; break; }
-                }
-                if (!match) continue;
             }
             if (db.col_month_year[i] != target_year) continue;
             if (db.col_month_month[i] < start_month || db.col_month_month[i] > end_month) continue;
@@ -424,20 +432,22 @@ static void runQueryInstrumented(
             if (db.col_month_month[i] < start_month || db.col_month_month[i] > end_month) continue;
             if (use_bitmap_count) {
                 if (!town_mask[i]) continue;
-            } else if (db.use_dict_encoding) {
-                bool match = false;
-                for (const auto& tid : town_ids) {
-                    ++local_town_cmp;
-                    if (db.col_town_encoded[i] == tid) { match = true; break; }
+            } else if (!e1_skip_town) {
+                if (db.use_dict_encoding) {
+                    bool match = false;
+                    for (const auto& tid : town_ids) {
+                        ++local_town_cmp;
+                        if (db.col_town_encoded[i] == tid) { match = true; break; }
+                    }
+                    if (!match) continue;
+                } else {
+                    bool match = false;
+                    for (const auto& t : towns) {
+                        ++local_town_cmp;
+                        if (db.col_town[i] == t) { match = true; break; }
+                    }
+                    if (!match) continue;
                 }
-                if (!match) continue;
-            } else {
-                bool match = false;
-                for (const auto& t : towns) {
-                    ++local_town_cmp;
-                    if (db.col_town[i] == t) { match = true; break; }
-                }
-                if (!match) continue;
             }
         }
 
@@ -528,8 +538,36 @@ static BenchmarkResult runBenchmark(
         test_meta.close();
     }
 
+    // E1: if town partitioning requested, ensure partitioned files exist
+    std::string e1_dir;
+    if (config.town_partitioning) {
+        e1_dir = "data/columns_e1";
+        if (config.dict_encoding)     e1_dir += "_dict";
+        if (config.precompute_ppsm)   e1_dir += "_ppsm";
+        if (config.presorted_storage) e1_dir += "_a2";
+
+        // Check if partition dirs exist by testing for any subdirectory
+        bool e1_exists = std::filesystem::exists(e1_dir) &&
+                         !std::filesystem::is_empty(e1_dir);
+        if (!e1_exists) {
+            std::cout << "  [E1] Partitioned files not found, generating from CSV...\n";
+            ColumnStore tmp;
+            tmp.use_dict_encoding    = config.dict_encoding;
+            tmp.use_precomputed_ppsm = config.precompute_ppsm;
+            tmp.use_presorted_storage = true; // E1 requires A2
+            loadCSV(csv_path, tmp);
+            writeColumnFilesPartitioned(tmp, e1_dir);
+            std::cout << "  [E1] Partitioned files written to " << e1_dir << "\n";
+        } else {
+            std::cout << "  [E1] Partitioned files found in " << e1_dir << "\n";
+        }
+    }
+
     auto t_load_start = std::chrono::high_resolution_clock::now();
-    if (config.columnar_files && db.use_mmap_io) {
+    if (config.town_partitioning) {
+        db.use_columnar_files = true; // E1 implies A9
+        loadColumnFilesPartitioned(e1_dir, towns, db);
+    } else if (config.columnar_files && db.use_mmap_io) {
         loadColumnFilesMmap(db.column_dir, db);
     } else if (config.columnar_files) {
         loadColumnFiles(db.column_dir, db);
@@ -842,7 +880,13 @@ int main(int argc, char* argv[]) {
 
         { "D2: mmap (A9+mmap)",                                                                  true,  false, true,  true,  true,  true,  false, false, false, true,  false, 50,    true },
         { "D2+All: mmap+everything",                                                             true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50,    true },
-        { "D2+C1C2: mmap+reuse",                                                                 true,  true,  true,  true,  true,  true,  false, false, false, true,  false, 50,    true },
+        { "D2+C1C2: mmap+reuse",                                                                 true,  true,  true,  true,  true,  true,  false, false, false, true,  false, 50, false, true },
+
+        { "E1: Town Partitioning",                                                               true,  false, false, false, false, false, true,  false, false, true,  false, 50, false, false, true },
+        { "E1+A1+A2: Partitioned+Dict+Presort",                                                 true,  false, false, false, false, false, true,  false, false, true,  false, 50, false, false, true },
+        { "E1+B1: Partitioned+ZoneMaps",                                                         true,  false, true,  true,  true,  true,  true,  false, false, true,  false, 50, false, false, true },
+        { "E1+C1C2: Partitioned+Reuse",                                                          true,  true,  false, false, false, false, true,  false, false, true,  false, 50, false, false, true },
+        { "E1+All: Partitioned+Everything",                                                      true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50, false, false, true },
 
         { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false },
         { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, true,  false, false },
