@@ -18,6 +18,11 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
 
 static void writeDictionary(std::ofstream& f, const DictionaryEncoder& dict) {
     const uint32_t num_entries = static_cast<uint32_t>(dict.id_to_str.size());
@@ -558,4 +563,237 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
     db.io_bytes_read += bytes;
 
     return n;
+}
+
+// ============================================================================
+// D2: Memory-mapped I/O
+// ============================================================================
+
+// Helper: mmap a file and register the region in db.mmap_regions for cleanup.
+// Returns pointer to the mapped data (past the uint32_t row-count header).
+static void* mmapColumnFile(const std::string& filepath,
+                            std::size_t        expected_rows,
+                            std::size_t        elem_size,
+                            ColumnStore&       db) {
+    int fd = ::open(filepath.c_str(), O_RDONLY);
+    if (fd < 0) {
+        throw std::runtime_error("D2 mmap: cannot open " + filepath);
+    }
+
+    struct stat st;
+    if (::fstat(fd, &st) != 0) {
+        ::close(fd);
+        throw std::runtime_error("D2 mmap: fstat failed on " + filepath);
+    }
+    const std::size_t file_size = static_cast<std::size_t>(st.st_size);
+    const std::size_t header    = sizeof(uint32_t); // row count
+    const std::size_t expected_size = header + expected_rows * elem_size;
+
+    if (file_size < expected_size) {
+        ::close(fd);
+        throw std::runtime_error("D2 mmap: file too small: " + filepath);
+    }
+
+    void* addr = ::mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (addr == MAP_FAILED) {
+        ::close(fd);
+        throw std::runtime_error("D2 mmap: mmap failed on " + filepath);
+    }
+
+    // Verify row count in file header
+    uint32_t file_N = 0;
+    std::memcpy(&file_N, addr, sizeof(file_N));
+    if (static_cast<std::size_t>(file_N) != expected_rows) {
+        ::munmap(addr, file_size);
+        ::close(fd);
+        throw std::runtime_error("D2 mmap: row count mismatch in " + filepath);
+    }
+
+    // Register for cleanup
+    db.mmap_regions.push_back({addr, file_size, fd});
+
+    // Return pointer past the header to the actual data
+    return static_cast<char*>(addr) + header;
+}
+
+void loadColumnFilesMmap(const std::string& dir, ColumnStore& db) {
+    // Meta must already be read (readMeta sets total_rows, dicts, flags)
+    readMeta(dir + "/meta.col", db);
+    const std::size_t N = db.total_rows;
+
+    if (N == 0) {
+        std::cout << "Column files loaded (mmap): 0 rows\n";
+        return;
+    }
+
+    // Helper: mmap a numeric column and memcpy into the vector
+    auto mmapNumericCol = [&](auto& vec, const std::string& name) {
+        using T = typename std::remove_reference<decltype(vec)>::type::value_type;
+        const void* data = mmapColumnFile(dir + "/" + name, N, sizeof(T), db);
+        vec.resize(N);
+        std::memcpy(vec.data(), data, N * sizeof(T));
+    };
+
+    // Always-needed filter columns
+    mmapNumericCol(db.col_month_year,   "month_year.col");
+    mmapNumericCol(db.col_month_month,  "month_month.col");
+    mmapNumericCol(db.col_floor_area,   "floor_area.col");
+    mmapNumericCol(db.col_resale_price, "resale_price.col");
+
+    // Town: encoded (A1) or raw string
+    if (db.use_dict_encoding) {
+        mmapNumericCol(db.col_town_encoded, "town_encoded.col");
+    } else {
+        // String columns can't be trivially mmapped into vectors,
+        // fall back to ifstream for the string column
+        std::ifstream f(dir + "/town.col", std::ios::binary);
+        if (!f.is_open()) throw std::runtime_error("D2: cannot open town.col");
+        uint32_t file_N = 0;
+        f.read(reinterpret_cast<char*>(&file_N), sizeof(file_N));
+        std::vector<uint32_t> offsets(file_N + 1);
+        f.read(reinterpret_cast<char*>(offsets.data()), offsets.size() * sizeof(uint32_t));
+        const uint32_t blob_size = offsets[file_N];
+        std::vector<char> blob(blob_size);
+        f.read(blob.data(), blob_size);
+        db.col_town.resize(file_N);
+        for (uint32_t i = 0; i < file_N; ++i) {
+            db.col_town[i].assign(blob.data() + offsets[i], offsets[i+1] - offsets[i]);
+        }
+    }
+
+    // Precomputed PPSM (A4)
+    if (db.use_precomputed_ppsm) {
+        mmapNumericCol(db.col_price_per_sqm, "price_per_sqm.col");
+    }
+
+    // Rebuild town partitions if pre-sorted (A2)
+    if (db.use_presorted_storage) {
+        if (db.use_dict_encoding) {
+            db.town_partitions_encoded.assign(db.dict_town.size(), TownPartition{});
+            uint16_t prev_id = db.col_town_encoded[0];
+            db.town_partitions_encoded[prev_id].begin = 0;
+            db.town_partitions_encoded[prev_id].valid = true;
+            for (std::size_t i = 1; i < N; ++i) {
+                uint16_t cur_id = db.col_town_encoded[i];
+                if (cur_id != prev_id) {
+                    db.town_partitions_encoded[prev_id].end = i;
+                    db.town_partitions_encoded[cur_id].begin = i;
+                    db.town_partitions_encoded[cur_id].valid = true;
+                    prev_id = cur_id;
+                }
+            }
+            db.town_partitions_encoded[prev_id].end = N;
+        } else {
+            std::string prev_town = db.col_town[0];
+            db.town_partitions[prev_town] = {0, 0, true};
+            for (std::size_t i = 1; i < N; ++i) {
+                if (db.col_town[i] != prev_town) {
+                    db.town_partitions[prev_town].end = i;
+                    prev_town = db.col_town[i];
+                    db.town_partitions[prev_town] = {i, 0, true};
+                }
+            }
+            db.town_partitions[prev_town].end = N;
+        }
+    }
+
+    if (db.use_zone_maps) {
+        const std::size_t num_zm_chunks = (N + ZONE_CHUNK_SIZE - 1) / ZONE_CHUNK_SIZE;
+
+        auto buildZM = [&](auto& col) -> ZoneMap {
+            ZoneMap zm;
+            zm.chunks.resize(num_zm_chunks);
+            for (std::size_t i = 0; i < col.size(); ++i) {
+                std::size_t c = i / ZONE_CHUNK_SIZE;
+                uint32_t v = static_cast<uint32_t>(col[i]);
+                if (v < zm.chunks[c].min_val) zm.chunks[c].min_val = v;
+                if (v > zm.chunks[c].max_val) zm.chunks[c].max_val = v;
+            }
+            return zm;
+        };
+
+        db.zm_floor_area   = buildZM(db.col_floor_area);
+        db.zm_resale_price = buildZM(db.col_resale_price);
+        db.zm_month_year   = buildZM(db.col_month_year);
+        db.zm_month_month  = buildZM(db.col_month_month);
+
+        std::cout << "  Zone maps built: " << num_zm_chunks
+                  << " chunks of " << ZONE_CHUNK_SIZE << " rows each\n";
+    }
+  }
+
+
+std::string loadStringAtMmap(const std::string& filepath, std::size_t idx) {
+    // For lazy materialisation we open+mmap+read+munmap in one shot.
+    // This avoids the ifstream open/close overhead of the non-mmap path.
+    int fd = ::open(filepath.c_str(), O_RDONLY);
+    if (fd < 0) {
+        throw std::runtime_error("D2 loadStringAtMmap: cannot open " + filepath);
+    }
+
+    struct stat st;
+    ::fstat(fd, &st);
+    const std::size_t file_size = static_cast<std::size_t>(st.st_size);
+
+    void* addr = ::mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (addr == MAP_FAILED) {
+        ::close(fd);
+        throw std::runtime_error("D2 loadStringAtMmap: mmap failed " + filepath);
+    }
+
+    const char* base = static_cast<const char*>(addr);
+
+    uint32_t N = 0;
+    std::memcpy(&N, base, sizeof(N));
+    if (idx >= N) {
+        ::munmap(addr, file_size);
+        ::close(fd);
+        throw std::out_of_range("loadStringAtMmap: index out of range");
+    }
+
+    // Offset table starts at byte 4
+    const uint32_t* offsets = reinterpret_cast<const uint32_t*>(base + sizeof(uint32_t));
+    uint32_t off_start = offsets[idx];
+    uint32_t off_end   = offsets[idx + 1];
+
+    const std::size_t data_start = sizeof(uint32_t) + (static_cast<std::size_t>(N) + 1) * sizeof(uint32_t);
+    std::string result(base + data_start + off_start, off_end - off_start);
+
+    ::munmap(addr, file_size);
+    ::close(fd);
+    return result;
+}
+
+
+uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
+    int fd = ::open(filepath.c_str(), O_RDONLY);
+    if (fd < 0) {
+        throw std::runtime_error("D2 loadUint16AtMmap: cannot open " + filepath);
+    }
+
+    struct stat st;
+    ::fstat(fd, &st);
+    const std::size_t file_size = static_cast<std::size_t>(st.st_size);
+
+    void* addr = ::mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (addr == MAP_FAILED) {
+        ::close(fd);
+        throw std::runtime_error("D2 loadUint16AtMmap: mmap failed " + filepath);
+    }
+
+    const char* base = static_cast<const char*>(addr);
+    uint32_t N = 0;
+    std::memcpy(&N, base, sizeof(N));
+    if (idx >= N) {
+        ::munmap(addr, file_size);
+        ::close(fd);
+        throw std::out_of_range("loadUint16AtMmap: index out of range");
+    }
+
+    uint16_t value = 0;
+    std::memcpy(&value, base + sizeof(uint32_t) + idx * sizeof(uint16_t), sizeof(value));
+
+    ::munmap(addr, file_size);
+    ::close(fd);
+    return value;
 }
