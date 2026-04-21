@@ -41,6 +41,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [flags...]\n"
         << "Flags: --dict-encoding --bitmap-index-town --presort-storage --month-bsearch --reuse\n"
         << "       --precompute-ppsm --int-multiply --predicate-reorder --zone-maps --late-materialise\n";
+        << "       --mmap-io\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
         std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
 
@@ -61,6 +62,7 @@ int main(int argc, char* argv[]) {
     bool enable_month_bsearch = false;
     bool enable_late_materialise = false;
     bool enable_columnar_files = false;
+    bool enable_mmap_io = false;
     bool write_columns_mode = false;
 
     for (int i = 2; i < argc; ++i) {
@@ -97,6 +99,9 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--columnar-files") == 0) {
             enable_columnar_files = true;
         }
+        if (std::strcmp(argv[i], "--mmap-io") == 0) {
+            enable_mmap_io = true;
+        }
         if (std::strcmp(argv[i], "--write-columns") == 0) {
             write_columns_mode = true;
         }
@@ -126,6 +131,8 @@ int main(int argc, char* argv[]) {
               << (enable_late_materialise ? "ON" : "OFF") << "\n";
     std::cout << "  Columnar Files:              "
           << (enable_columnar_files ? "ON" : "OFF") << "\n";
+    std::cout << "  Memory-Mapped I/O (D2):      "
+          << (enable_mmap_io ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
     
     // phase 1: extract query params from matric number
@@ -165,6 +172,7 @@ int main(int argc, char* argv[]) {
     db.use_month_binary_search = enable_month_bsearch;
     db.use_late_materialise = enable_late_materialise;
     db.use_columnar_files = enable_columnar_files;
+    db.use_mmap_io = enable_mmap_io;
 
     // One-time conversion mode: parse CSV, write column files, then exit
     if (write_columns_mode) {
@@ -180,8 +188,21 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        if (db.use_columnar_files) {
-            loadColumnFiles(db.column_dir, db);
+        // D2 validation: mmap requires columnar files, conflicts with chunked I/O
+        if (db.use_mmap_io && !db.use_columnar_files) {
+            std::cout << "  [D2] WARNING: mmap_io requires columnar_files — disabling D2.\n";
+            db.use_mmap_io = false;
+        }
+        if (db.use_mmap_io && db.use_chunked_io) {
+            std::cout << "  [D2] WARNING: mmap_io conflicts with chunked_io (D1) — disabling D2.\n";
+            db.use_mmap_io = false;
+        }
+
+        try {
+            if (db.use_columnar_files && db.use_mmap_io) {
+                loadColumnFilesMmap(db.column_dir, db);
+            } else if (db.use_columnar_files) {
+                loadColumnFiles(db.column_dir, db);
         } else {
             loadCSV("../data/ResalePricesSingapore.csv", db);
         }
