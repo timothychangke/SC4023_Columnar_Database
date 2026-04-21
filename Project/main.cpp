@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [flags...]\n"
         << "Flags: --dict-encoding --bitmap-index-town --presort-storage --month-bsearch --reuse\n"
         << "       --precompute-ppsm --int-multiply --predicate-reorder --zone-maps --late-materialise\n";
-        << "       --mmap-io\n";
+        << "       --mmap-io --town-partitioning --write-columns-partitioned\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
         std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
 
@@ -63,7 +63,9 @@ int main(int argc, char* argv[]) {
     bool enable_late_materialise = false;
     bool enable_columnar_files = false;
     bool enable_mmap_io = false;
+    bool enable_town_partitioning = false;
     bool write_columns_mode = false;
+    bool write_columns_partitioned_mode = false;
 
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dict-encoding") == 0) {
@@ -105,6 +107,12 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--write-columns") == 0) {
             write_columns_mode = true;
         }
+        if (std::strcmp(argv[i], "--town-partitioning") == 0) {
+            enable_town_partitioning = true;
+        }
+        if (std::strcmp(argv[i], "--write-columns-partitioned") == 0) {
+            write_columns_partitioned_mode = true;
+        }
         // add more flags here as we implement more optimisations
     }
 
@@ -133,6 +141,8 @@ int main(int argc, char* argv[]) {
           << (enable_columnar_files ? "ON" : "OFF") << "\n";
     std::cout << "  Memory-Mapped I/O (D2):      "
           << (enable_mmap_io ? "ON" : "OFF") << "\n";
+    std::cout << "  Town Partitioning (E1):      "
+          << (enable_town_partitioning ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
     
     // phase 1: extract query params from matric number
@@ -173,6 +183,7 @@ int main(int argc, char* argv[]) {
     db.use_late_materialise = enable_late_materialise;
     db.use_columnar_files = enable_columnar_files;
     db.use_mmap_io = enable_mmap_io;
+    db.use_town_partitioning = enable_town_partitioning;
 
     // One-time conversion mode: parse CSV, write column files, then exit
     if (write_columns_mode) {
@@ -184,6 +195,18 @@ int main(int argc, char* argv[]) {
         }
         writeColumnFiles(db, "data/columns/");
         std::cout << "Column files written. Now run with --columnar-files.\n";
+        return 0;
+    }
+    // E1: One-time partitioned conversion mode
+    if (write_columns_partitioned_mode) {
+        try {
+            loadCSV("../data/ResalePricesSingapore.csv", db);
+        } catch (const std::runtime_error& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        writeColumnFilesPartitioned(db, "data/columns_e1/");
+        std::cout << "Partitioned column files written. Now run with --town-partitioning.\n";
         return 0;
     }
 
@@ -199,7 +222,14 @@ int main(int argc, char* argv[]) {
         }
 
         try {
-            if (db.use_columnar_files && db.use_mmap_io) {
+            if (db.use_town_partitioning) {
+                // E1 validation
+                if (!db.use_columnar_files) {
+                    std::cout << "  [E1] NOTE: town_partitioning implies columnar_files, enabling.\n";
+                    db.use_columnar_files = true;
+                }
+                loadColumnFilesPartitioned("data/columns_e1", towns, db);
+            } else if (db.use_columnar_files && db.use_mmap_io) {
                 loadColumnFilesMmap(db.column_dir, db);
             } else if (db.use_columnar_files) {
                 loadColumnFiles(db.column_dir, db);

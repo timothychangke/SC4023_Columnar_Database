@@ -313,6 +313,20 @@ struct ColumnStore {
     // Composes with: A1, A2, A4, B1, B3, C1+C2, C3, C4, C6
     bool use_mmap_io = false;
 
+    // ── E1: Physical Partitioning by Town ──
+    // When true, column files are split into one subdirectory per town.
+    // At query time, only the partition directories matching the target
+    // towns are loaded, eliminating the Town predicate entirely.
+    //
+    // Requires: use_columnar_files = true (partitioning is a file-layout opt)
+    // Synergises with: A1 (partition by town_id), A2 (town-contiguous order)
+    // Composes with: B1 (zone maps per partition), C3, D2
+    bool use_town_partitioning = false;
+
+    // When town_partitioning is active, this records which partition dirs
+    // were loaded (for diagnostic / instrumentation purposes).
+    std::vector<std::string> loaded_partition_dirs;
+
     // Storage for mmap handles so the destructor can munmap them.
     struct MappedRegion {
         void*       addr   = nullptr;

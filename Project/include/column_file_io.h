@@ -44,3 +44,16 @@ void loadColumnFilesMmap(const std::string& dir, ColumnStore& db);
 // D2: mmap-backed lazy materialisation — avoids per-call ifstream open.
 std::string loadStringAtMmap(const std::string& filepath, std::size_t idx);
 uint16_t    loadUint16AtMmap(const std::string& filepath, std::size_t idx);
+
+// E1: Write column files partitioned by town into subdirectories.
+// Creates base_dir/TOWN_NAME/ for each town, each containing its own
+// meta.col + per-column .col files. Requires A2 (presorted) so that
+// town_partitions are available.
+void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_dir);
+
+// E1: Load only the partition directories matching target_towns.
+// Concatenates the rows from each matching partition into db's column vectors.
+// Town column is implicit — not loaded (the loaded data is pre-filtered).
+void loadColumnFilesPartitioned(const std::string& base_dir,
+                                const std::vector<std::string>& target_towns,
+                                ColumnStore& db);

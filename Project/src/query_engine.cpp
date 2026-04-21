@@ -242,7 +242,7 @@ void runQuery(const ColumnStore&              db,
             return;
         }
 
-        if (db.use_columnar_files) {
+        if (db.use_columnar_files && !db.use_town_partitioning) {
             result.town                = db.use_mmap_io
                 ? loadStringAtMmap(db.column_dir + "/town.col", e.idx)
                 : loadStringAt(db.column_dir + "/town.col", e.idx);
@@ -343,7 +343,7 @@ void runQuery(const ColumnStore&              db,
         result.floor_area          = db.col_floor_area[best_i];
         result.price_per_sqm       = min_ppsm;
 
-        if (db.use_columnar_files) {
+        if (db.use_columnar_files && !db.use_town_partitioning) {
             result.town                = db.use_mmap_io
                 ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
                 : loadStringAt(db.column_dir + "/town.col", best_i);
@@ -380,7 +380,7 @@ void runQuery(const ColumnStore&              db,
 
     // --- A1 setup: pre-resolve town IDs once (outside the loop) ---
     std::vector<uint16_t> town_ids;
-    if (db.use_dict_encoding && !use_bitmap_path) {
+    if (db.use_dict_encoding && !use_bitmap_path && !db.use_town_partitioning) {
         town_ids.reserve(towns.size());
         for (const auto& t : towns) {
             uint16_t id;
@@ -450,7 +450,7 @@ void runQuery(const ColumnStore&              db,
 
             if (db.use_predicate_reorder) {
                 // --- C4 ON: Town FIRST (eliminates ~80% of rows) ---
-                if (!use_bitmap_path) {
+                if (!use_bitmap_path && !db.use_town_partitioning) {
                     if (db.use_dict_encoding) {
                         bool match = false;
                         const uint16_t row_id = db.col_town_encoded[i];
@@ -480,7 +480,8 @@ void runQuery(const ColumnStore&              db,
                 if (m < start_month || m > end_month) continue;
 
                 // town match (A1 controls int vs string)
-                if (!use_bitmap_path) {
+                // E1: skip when town_partitioning is on — data is pre-filtered
+                if (!use_bitmap_path && !db.use_town_partitioning) {
                     if (db.use_dict_encoding) {
                         bool match = false;
                         const uint16_t row_id = db.col_town_encoded[i];
@@ -571,7 +572,7 @@ void runQuery(const ColumnStore&              db,
     result.floor_area = db.col_floor_area[best_i];
     result.price_per_sqm = min_ppsm;
 
-    if (db.use_columnar_files) {
+    if (db.use_columnar_files && !db.use_town_partitioning) {
         result.town                = db.use_mmap_io
             ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
             : loadStringAt(db.column_dir + "/town.col", best_i);
