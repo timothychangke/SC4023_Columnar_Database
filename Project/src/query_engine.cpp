@@ -32,6 +32,44 @@
 #include <iostream>
 
 namespace {
+std::vector<uint8_t> buildTownBitmapMaskImpl(const ColumnStore& db,
+                                             const std::vector<std::string>& towns) {
+    const std::size_t N = db.size();
+    std::vector<uint8_t> mask(N, 0);
+
+    if (!db.use_bitmap_index_town || db.town_bitmaps.empty()) {
+        return mask;
+    }
+
+    if (db.use_dict_encoding) {
+        for (const auto& t : towns) {
+            uint16_t tid = 0;
+            if (!db.dict_town.lookup(t, tid)) continue;
+            if (tid >= db.town_bitmaps.size()) continue;
+
+            ++db.town_bitmap_lookups;
+            const auto& bm = db.town_bitmaps[tid];
+            for (std::size_t i = 0; i < N; ++i) {
+                mask[i] = static_cast<uint8_t>(mask[i] | static_cast<uint8_t>(bm[i]));
+            }
+        }
+    } else {
+        for (const auto& t : towns) {
+            auto it = db.town_bitmap_lookup.find(t);
+            if (it == db.town_bitmap_lookup.end()) continue;
+            if (it->second >= db.town_bitmaps.size()) continue;
+
+            ++db.town_bitmap_lookups;
+            const auto& bm = db.town_bitmaps[it->second];
+            for (std::size_t i = 0; i < N; ++i) {
+                mask[i] = static_cast<uint8_t>(mask[i] | static_cast<uint8_t>(bm[i]));
+            }
+        }
+    }
+
+    return mask;
+}
+
 inline uint32_t monthKey(uint16_t year, uint8_t month) {
     return static_cast<uint32_t>(year) * 12u + static_cast<uint32_t>(month - 1u);
 }
@@ -105,6 +143,11 @@ std::vector<std::string> buildTownList(const std::string& matric_number) {
     return towns;
 }
 
+std::vector<uint8_t> buildTownBitmapMask(const ColumnStore& db,
+                                         const std::vector<std::string>& towns) {
+    return buildTownBitmapMaskImpl(db, towns);
+}
+
 void deriveQueryParams(const std::string& matric_number,
                        uint16_t& target_year, uint8_t& start_month) {
     int last_digit        = -1;
@@ -149,7 +192,8 @@ void runQuery(const ColumnStore&              db,
               uint16_t                        target_year,
               uint8_t                         start_month,
               const std::vector<std::string>& towns,
-              QueryResult&                    result) {
+              QueryResult&                    result,
+              const std::vector<uint8_t>*     precomputed_town_mask) {
 
     result.x         = x;
     result.y         = y;
@@ -163,6 +207,19 @@ void runQuery(const ColumnStore&              db,
     std::size_t best_i   = 0;
 
     const std::size_t N = db.size();
+
+    // --- B2 setup: reuse a precomputed town mask when available ---
+    std::vector<uint8_t> local_town_mask;
+    const std::vector<uint8_t>* town_mask_ptr = precomputed_town_mask;
+    bool use_bitmap_path = db.use_bitmap_index_town &&
+                           !db.town_bitmaps.empty() &&
+                           db.town_bitmaps.front().size() == N;
+    if (use_bitmap_path) {
+        if (town_mask_ptr == nullptr) {
+            local_town_mask = buildTownBitmapMaskImpl(db, towns);
+            town_mask_ptr = &local_town_mask;
+        }
+    }
 
     // =================================================================
     // REUSE PATH — O(1) table lookup, bypasses scan entirely
@@ -310,7 +367,7 @@ void runQuery(const ColumnStore&              db,
 
     // --- A1 setup: pre-resolve town IDs once (outside the loop) ---
     std::vector<uint16_t> town_ids;
-    if (db.use_dict_encoding) {
+    if (db.use_dict_encoding && !use_bitmap_path) {
         town_ids.reserve(towns.size());
         for (const auto& t : towns) {
             uint16_t id;
@@ -370,21 +427,31 @@ void runQuery(const ColumnStore&              db,
             // A1 controls HOW the town predicate is evaluated.
             // These two are orthogonal — every combination works.
 
+            if (use_bitmap_path) {
+                ++db.town_bitmap_evaluations;
+                if (!(*town_mask_ptr)[i]) {
+                    ++db.rows_eliminated_by_bitmap;
+                    continue;
+                }
+            }
+
             if (db.use_predicate_reorder) {
                 // --- C4 ON: Town FIRST (eliminates ~80% of rows) ---
-                if (db.use_dict_encoding) {
-                    bool match = false;
-                    const uint16_t row_id = db.col_town_encoded[i];
-                    for (const auto& tid : town_ids) {
-                        if (row_id == tid) { match = true; break; }
+                if (!use_bitmap_path) {
+                    if (db.use_dict_encoding) {
+                        bool match = false;
+                        const uint16_t row_id = db.col_town_encoded[i];
+                        for (const auto& tid : town_ids) {
+                            if (row_id == tid) { match = true; break; }
+                        }
+                        if (!match) continue;
+                    } else {
+                        bool match = false;
+                        for (const auto& t : towns) {
+                            if (db.col_town[i] == t) { match = true; break; }
+                        }
+                        if (!match) continue;
                     }
-                    if (!match) continue;
-                } else {
-                    bool match = false;
-                    for (const auto& t : towns) {
-                        if (db.col_town[i] == t) { match = true; break; }
-                    }
-                    if (!match) continue;
                 }
 
                 // then year and month
@@ -400,19 +467,21 @@ void runQuery(const ColumnStore&              db,
                 if (m < start_month || m > end_month) continue;
 
                 // town match (A1 controls int vs string)
-                if (db.use_dict_encoding) {
-                    bool match = false;
-                    const uint16_t row_id = db.col_town_encoded[i];
-                    for (const auto& tid : town_ids) {
-                        if (row_id == tid) { match = true; break; }
+                if (!use_bitmap_path) {
+                    if (db.use_dict_encoding) {
+                        bool match = false;
+                        const uint16_t row_id = db.col_town_encoded[i];
+                        for (const auto& tid : town_ids) {
+                            if (row_id == tid) { match = true; break; }
+                        }
+                        if (!match) continue;
+                    } else {
+                        bool match = false;
+                        for (const auto& t : towns) {
+                            if (db.col_town[i] == t) { match = true; break; }
+                        }
+                        if (!match) continue;
                     }
-                    if (!match) continue;
-                } else {
-                    bool match = false;
-                    for (const auto& t : towns) {
-                        if (db.col_town[i] == t) { match = true; break; }
-                    }
-                    if (!match) continue;
                 }
             }
 
@@ -667,6 +736,7 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
         part.use_predicate_reorder = base_db.use_predicate_reorder;
         part.use_late_materialise  = base_db.use_late_materialise;
         part.use_zone_maps         = base_db.use_zone_maps;
+        part.use_bitmap_index_town = base_db.use_bitmap_index_town;
         part.use_columnar_files    = true;
         part.column_dir            = base_db.column_dir;
 

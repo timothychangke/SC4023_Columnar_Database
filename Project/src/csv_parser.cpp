@@ -408,6 +408,16 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
 
     std::cout << "---------------------------------------------------\n";
 
+    // === B2: Town Bitmap Index ===
+    // Build after optional A2 reordering so bitmap row positions match
+    // the final physical row layout.
+    if (db.use_bitmap_index_town) {
+        db.rebuildTownBitmaps();
+        std::cout << "Town bitmap index built: "
+                  << db.town_bitmaps.size() << " towns x "
+                  << db.size() << " rows\n";
+    }
+
     // === Zone Map Construction (B1) ===
     if (db.use_zone_maps) {
         const std::size_t N = db.size();

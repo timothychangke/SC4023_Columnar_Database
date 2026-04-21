@@ -2133,6 +2133,151 @@ static void testZoneMapOptimisation(TestRunner& t) {
 }
 
 // =============================================================================
+// Section 17: B2 Bitmap Town Index
+// =============================================================================
+static void testBitmapTownOptimisation(TestRunner& t) {
+      t.section("B2 Optimisation (Bitmap Index on Town)");
+
+      const std::string csv =
+            HEADER_10 +
+            "Jan-17,TAMPINES,3 ROOM,101,TAMPINES ST 1,01 TO 03,90,Improved,1990,270000\n"
+            "Jan-17,BEDOK,4 ROOM,102,BEDOK ST 2,04 TO 06,100,Standard,1988,320000\n"
+            "Feb-17,TAMPINES,3 ROOM,103,TAMPINES ST 3,07 TO 09,95,Model A,1992,300000\n"
+            "Feb-17,WOODLANDS,4 ROOM,104,WOODLANDS ST 4,10 TO 12,110,Model B,1994,352000\n"
+            "Mar-17,BEDOK,5 ROOM,105,BEDOK ST 5,01 TO 03,120,Model C,1985,420000\n"
+            "Mar-17,TAMPINES,3 ROOM,106,TAMPINES ST 6,04 TO 06,85,Model D,1991,255000\n";
+
+      t.run("B2: Bitmap construction matches expected row pattern", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_b2_bitmap_build.csv");
+
+            ColumnStore db;
+            db.use_bitmap_index_town = true;
+            loadCSV(fname, db);
+
+            ASSERT_EQ(db.size(), 6u);
+            ASSERT(db.town_bitmap_lookup.find("TAMPINES") != db.town_bitmap_lookup.end());
+            ASSERT(db.town_bitmap_lookup.find("BEDOK") != db.town_bitmap_lookup.end());
+
+            const uint16_t tamp_id = db.town_bitmap_lookup["TAMPINES"];
+            const uint16_t bedok_id = db.town_bitmap_lookup["BEDOK"];
+            ASSERT(tamp_id < db.town_bitmaps.size());
+            ASSERT(bedok_id < db.town_bitmaps.size());
+
+            const auto& tamp_bm = db.town_bitmaps[tamp_id];
+            const auto& bedok_bm = db.town_bitmaps[bedok_id];
+
+            ASSERT_EQ(tamp_bm.size(), 6u);
+            ASSERT(tamp_bm[0] && !tamp_bm[1] && tamp_bm[2] && !tamp_bm[3] && !tamp_bm[4] && tamp_bm[5]);
+            ASSERT(!bedok_bm[0] && bedok_bm[1] && !bedok_bm[2] && !bedok_bm[3] && bedok_bm[4] && !bedok_bm[5]);
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("B2: Query results match baseline implementation", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_b2_parity.csv");
+
+            ColumnStore base;
+            loadCSV(fname, base);
+
+            ColumnStore b2;
+            b2.use_bitmap_index_town = true;
+            loadCSV(fname, b2);
+
+            const std::vector<std::string> towns = {"TAMPINES", "BEDOK"};
+            for (int x = 1; x <= 3; ++x) {
+                  for (int y = 80; y <= 120; y += 10) {
+                        QueryResult rb, ro;
+                        runQuery(base, x, y, 2017, 1, towns, rb);
+                        runQuery(b2, x, y, 2017, 1, towns, ro);
+                        ASSERT_EQ(rb.no_result, ro.no_result);
+                        if (!rb.no_result) {
+                              ASSERT_EQ(rb.town, ro.town);
+                              ASSERT_EQ(rb.block, ro.block);
+                              ASSERT_NEAR(rb.price_per_sqm, ro.price_per_sqm, 1e-9);
+                        }
+                  }
+            }
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("B2+A1 and B2+A2 preserve correctness", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_b2_a1_a2.csv");
+
+            ColumnStore base;
+            loadCSV(fname, base);
+
+            ColumnStore a1b2;
+            a1b2.use_dict_encoding = true;
+            a1b2.use_bitmap_index_town = true;
+            loadCSV(fname, a1b2);
+
+            ColumnStore a2b2;
+            a2b2.use_presorted_storage = true;
+            a2b2.use_bitmap_index_town = true;
+            loadCSV(fname, a2b2);
+
+            const std::vector<std::string> towns = {"TAMPINES", "BEDOK"};
+            QueryResult r0, r1, r2;
+            runQuery(base, 3, 80, 2017, 1, towns, r0);
+            runQuery(a1b2, 3, 80, 2017, 1, towns, r1);
+            runQuery(a2b2, 3, 80, 2017, 1, towns, r2);
+
+            ASSERT_EQ(r0.no_result, r1.no_result);
+            ASSERT_EQ(r0.no_result, r2.no_result);
+            if (!r0.no_result) {
+                  ASSERT_EQ(r0.town, r1.town);
+                  ASSERT_EQ(r0.town, r2.town);
+                  ASSERT_NEAR(r0.price_per_sqm, r1.price_per_sqm, 1e-9);
+                  ASSERT_NEAR(r0.price_per_sqm, r2.price_per_sqm, 1e-9);
+            }
+
+            ASSERT(!a2b2.town_partitions.empty());
+            std::remove(fname.c_str());
+      });
+
+      t.run("B2: single-town, no-match, and all-towns queries match baseline", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_b2_edge_cases.csv");
+
+            ColumnStore base;
+            loadCSV(fname, base);
+
+            ColumnStore b2;
+            b2.use_bitmap_index_town = true;
+            loadCSV(fname, b2);
+
+            {
+                  const std::vector<std::string> one_town = {"TAMPINES"};
+                  QueryResult rb, ro;
+                  runQuery(base, 3, 80, 2017, 1, one_town, rb);
+                  runQuery(b2, 3, 80, 2017, 1, one_town, ro);
+                  ASSERT_EQ(rb.no_result, ro.no_result);
+                  if (!rb.no_result) ASSERT_NEAR(rb.price_per_sqm, ro.price_per_sqm, 1e-9);
+            }
+
+            {
+                  const std::vector<std::string> missing = {"HOUGANG"};
+                  QueryResult rb, ro;
+                  runQuery(base, 3, 80, 2017, 1, missing, rb);
+                  runQuery(b2, 3, 80, 2017, 1, missing, ro);
+                  ASSERT_EQ(rb.no_result, ro.no_result);
+                  ASSERT(rb.no_result);
+            }
+
+            {
+                  const std::vector<std::string> all_towns = {"TAMPINES", "BEDOK", "WOODLANDS"};
+                  QueryResult rb, ro;
+                  runQuery(base, 3, 80, 2017, 1, all_towns, rb);
+                  runQuery(b2, 3, 80, 2017, 1, all_towns, ro);
+                  ASSERT_EQ(rb.no_result, ro.no_result);
+                  if (!rb.no_result) ASSERT_NEAR(rb.price_per_sqm, ro.price_per_sqm, 1e-9);
+            }
+
+            std::remove(fname.c_str());
+      });
+}
+
+// =============================================================================
 // main
 // =============================================================================
 int main()
@@ -2162,6 +2307,7 @@ int main()
   testA4C6C4Optimisations(t);
   testA2B3Optimisations(t);
   testZoneMapOptimisation(t);
+      testBitmapTownOptimisation(t);
 
   t.summary();
   return 0;

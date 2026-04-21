@@ -65,6 +65,15 @@ struct QueryResult {
 std::vector<std::string> buildTownList(const std::string& matric_number);
 
 /*
+ * buildTownBitmapMask
+ * Build a combined town mask once for a fixed town list.
+ * The mask is sized to db.size() and can be reused across all 568 queries
+ * for the same matriculation number.
+ */
+std::vector<uint8_t> buildTownBitmapMask(const ColumnStore& db,
+                                         const std::vector<std::string>& towns);
+
+/*
  * deriveQueryParams
  * extract base year and start month from matric number:
  * - target year: based on the LAST digit of the matric
@@ -111,7 +120,8 @@ void runQuery(const ColumnStore&              db,
               uint16_t                        target_year,
               uint8_t                         start_month,
               const std::vector<std::string>& towns,
-              QueryResult&                    result);
+              QueryResult&                    result,
+              const std::vector<uint8_t>*     precomputed_town_mask = nullptr);
 
 /*
  * buildCumulativeTable

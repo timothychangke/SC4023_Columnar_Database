@@ -132,14 +132,7 @@ g++ -std=c++17 -Wall -Wextra -Iinclude \
 To build the evaluation suite:
 
 ```bash
-g++ -std=c++17 -Wall -Wextra -Iinclude \
-  eval/eval_suite.cpp \
-  src/column_store.cpp \
-  src/csv_parser.cpp \
-  src/query_engine.cpp \
-  src/output_writer.cpp \
-  src/column_file_io.cpp \
-  -o eval_runner
+g++ -std=c++17 -Wall -Wextra -Iinclude  eval/eval_suite.cpp  src/column_store.cpp src/csv_parser.cpp  src/query_engine.cpp  src/output_writer.cpp  src/column_file_io.cpp  -o eval_runner
 ```
 
 ---
@@ -182,6 +175,30 @@ Output written to : ScanResult_A5656567B.csv
 Valid (x,y) pairs : 47
 Done.
 ```
+
+---
+
+## Optimisation Flags (CLI)
+
+Run with one or more flags:
+
+```bash
+./column_store <MatriculationNumber> [flags...]
+```
+
+Common flags:
+
+- `--dict-encoding` (A1)
+- `--bitmap-index-town` (B2)
+- `--presort-storage` (A2)
+- `--month-bsearch` (B3)
+- `--zone-maps` (B1)
+- `--precompute-ppsm` (A4)
+- `--int-multiply` (C6)
+- `--predicate-reorder` (C4)
+- `--late-materialise` (C3)
+- `--reuse` (C1/C2)
+- `--columnar-files` (A9)
 
 ---
 

@@ -233,6 +233,26 @@ struct ColumnStore {
     DictionaryEncoder dict_flat_model;
     DictionaryEncoder dict_street_name;
 
+    // === B2: Bitmap Index on Town ===
+    // One bit-vector per town, one bit per row.
+    // Layout:
+    //   town_bitmaps[town_idx][row_idx] == true  <=>  row belongs to town_idx
+    //
+    // If A1 is enabled, town_idx is exactly the dictionary ID (col_town_encoded).
+    // If A1 is disabled, town_idx is resolved through town_bitmap_lookup.
+    //
+    // Trade-off:
+    //   + Fast town predicate evaluation via precomputed mask
+    //   - Extra memory O(num_towns * num_rows) bits
+    bool use_bitmap_index_town = false;
+    std::vector<std::vector<bool>> town_bitmaps;
+    std::unordered_map<std::string, uint16_t> town_bitmap_lookup;
+
+    // B2 observability counters (updated by runQuery)
+    mutable std::size_t town_bitmap_lookups = 0;        // number of bitmap vectors OR-ed into masks
+    mutable std::size_t town_bitmap_evaluations = 0;    // rows checked against town bitmap mask
+    mutable std::size_t rows_eliminated_by_bitmap = 0;  // rows skipped by bitmap mask
+
     // Zone map optimisation flag (B1)
     // When true, zone maps are built during loadCSV for numeric columns.
     // runQuery will skip entire chunks whose min/max range
@@ -309,6 +329,10 @@ struct ColumnStore {
     
     // return total records stored 
     std::size_t size() const;
+
+    // (Re)build the B2 town bitmap index from current row order.
+    // Must be called after any row reordering (e.g. A2 presort).
+    void rebuildTownBitmaps();
 
     // clear data and free memory
     void clear();

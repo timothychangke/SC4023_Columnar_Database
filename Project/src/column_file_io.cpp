@@ -371,6 +371,13 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
     if (db.use_presorted_storage) {
         std::cout << "  Town partitions rebuilt: " << db.town_partitions.size() << "\n";
     }
+
+    if (db.use_bitmap_index_town) {
+        db.rebuildTownBitmaps();
+        std::cout << "  Town bitmap index built: " << db.town_bitmaps.size()
+                  << " towns x " << db.size() << " rows\n";
+    }
+
     std::cout << "  Materialisation columns: deferred (lazy load)\n";
 }
 
@@ -533,6 +540,10 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
     if (db.use_precomputed_ppsm) {
         readNumericRange<double>(dir + "/price_per_sqm.col",
                                  chunk_start, chunk_rows, db.col_price_per_sqm);
+    }
+
+    if (db.use_bitmap_index_town) {
+        db.rebuildTownBitmaps();
     }
 
     // Update byte counter (approx: we read `n` rows from ~5 files at their
