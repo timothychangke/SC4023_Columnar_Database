@@ -3,6 +3,8 @@
  */
 
 #include "column_store.h"
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 
@@ -97,6 +99,17 @@ void ColumnStore::clear() {
     zm_month_year.chunks.clear();
     zm_month_month.chunks.clear();
     
+    // D2: unmap any mmap regions
+    for (auto& mr : mmap_regions) {
+        if (mr.addr && mr.addr != MAP_FAILED) {
+            ::munmap(mr.addr, mr.length);
+        }
+        if (mr.fd >= 0) {
+            ::close(mr.fd);
+        }
+    }
+    mmap_regions.clear();
+
     column_dir = "data/columns/";
     total_rows = 0;
 }

@@ -301,6 +301,27 @@ struct ColumnStore {
     // Mutable so runAllQueriesChunked can update them via a const ref.
     mutable std::size_t io_chunks_loaded = 0;
     mutable std::size_t io_bytes_read    = 0;
+    
+    // ── D2: Memory-mapped I/O ──
+    // When true, column files are loaded via mmap(2) instead of fread.
+    // Eliminates read() syscall overhead; the OS demand-pages data on
+    // first access, enabling lazy paging for columns that are never touched.
+    //
+    // Requires: use_columnar_files = true (operates on .col files)
+    // Conflicts with: use_chunked_io (D1 is explicit bounded reads; D2 is
+    //   the opposite strategy — enabling both is incoherent)
+    // Composes with: A1, A2, A4, B1, B3, C1+C2, C3, C4, C6
+    bool use_mmap_io = false;
+
+    // Storage for mmap handles so the destructor can munmap them.
+    struct MappedRegion {
+        void*       addr   = nullptr;
+        std::size_t length = 0;
+        int         fd     = -1;
+    };
+    std::vector<MappedRegion> mmap_regions;
+
+    // Zone maps for filterable numeric columns
 
 
     // Zone maps for filterable numeric columns

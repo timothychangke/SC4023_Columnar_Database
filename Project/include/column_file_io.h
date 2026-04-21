@@ -34,3 +34,13 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
                                  std::size_t        chunk_start,
                                  std::size_t        chunk_rows,
                                  ColumnStore&       db);
+
+// D2: Load filter columns via mmap(2) instead of fread.
+// Maps each .col file into the process address space and memcpy's the
+// data into the existing std::vector columns (eliminates per-call syscall
+// overhead but still copies into vectors for downstream compatibility).
+void loadColumnFilesMmap(const std::string& dir, ColumnStore& db);
+
+// D2: mmap-backed lazy materialisation — avoids per-call ifstream open.
+std::string loadStringAtMmap(const std::string& filepath, std::size_t idx);
+uint16_t    loadUint16AtMmap(const std::string& filepath, std::size_t idx);
