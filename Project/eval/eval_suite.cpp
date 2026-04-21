@@ -116,6 +116,7 @@ struct OptConfig {
     bool        chunked_io      = false;  // D1
     std::size_t memory_budget_mb = 50;    // D1
     bool bitmap_index_town = false; // B2
+    bool        mmap_io         = false;  // D2
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
@@ -132,6 +133,7 @@ struct OptConfig {
         db.use_bitmap_index_town = bitmap_index_town;
         db.use_chunked_io      = chunked_io;
         db.memory_budget_bytes = memory_budget_mb * 1024 * 1024;
+        db.use_mmap_io         = mmap_io;
     }
 };
 
@@ -527,7 +529,9 @@ static BenchmarkResult runBenchmark(
     }
 
     auto t_load_start = std::chrono::high_resolution_clock::now();
-    if (config.columnar_files) {
+    if (config.columnar_files && db.use_mmap_io) {
+        loadColumnFilesMmap(db.column_dir, db);
+    } else if (config.columnar_files) {
         loadColumnFiles(db.column_dir, db);
     } else {
         loadCSV(csv_path, db);
@@ -550,6 +554,17 @@ static BenchmarkResult runBenchmark(
             std::cout << "  [D1] memory_budget = " << config.memory_budget_mb
                       << " MB, io_chunk_rows = " << db.io_chunk_rows
                       << ", total_rows = " << db.total_rows << "\n";
+        }
+    }
+
+    // D2 validation
+    if (config.mmap_io) {
+        if (!config.columnar_files) {
+            std::cout << "  [D2] WARNING: mmap_io requires columnar_files — disabling D2.\n";
+            db.use_mmap_io = false;
+        } else if (config.chunked_io) {
+            std::cout << "  [D2] WARNING: mmap_io conflicts with chunked_io (D1) — disabling D2.\n";
+            db.use_mmap_io = false;
         }
     }
 
@@ -797,13 +812,14 @@ int main(int argc, char* argv[]) {
         { "B1: Zone Maps",                                                                       false, false, false, false, false, true,  false, false, false, false },
         { "A1+B1: Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false, false, false },
         { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true,  true,  true,  true,  false, false, false, false },
+
         { "B2: Bitmap Town Index",                                                               false, false, false, false, false, false, false, false, false, false, false, 50, true },
         { "A1+B2: Dict + Bitmap Town",                                                           true,  false, false, false, false, false, false, false, false, false, false, 50, true },
         { "A2+B2: Presort + Bitmap Town",                                                        false, false, false, false, false, false, true,  false, false, false, false, 50, true },
         { "B1+B2: Zone Maps + Bitmap Town",                                                      false, false, false, false, false, true,  false, false, false, false, false, 50, true },
         { "C3+B2: LateMat + Bitmap Town",                                                        false, false, false, false, false, false, false, false, true,  false, false, 50, true },
         { "A1+A2+B1+C3+B2: Full Scan Stack + Bitmap",                                            true,  false, false, false, true,  true,  true,  false, true,  false, false, 50, true },
-        //  have no effect, but proves no conflict
+
         { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true,  false, false, false, true,  false, false, false, false },
         { "C3: Late Materialise",                                                                false, false, false, false, false, false, false, false, true,  false },
         { "A1+C3: Dict+LateMat",                                                                 true,  false, false, false, false, false, false, false, true,  false },
@@ -817,12 +833,16 @@ int main(int argc, char* argv[]) {
         { "A9+C1C2: Columnar+Reuse",                                                             false, true,  false, false, false, false, false, false, false, true  },
         { "A9+All: Everything",                                                                  true,  true,  true,  true,  true,  true,  true,  true,  true,  true  },
 
-        { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  /*chunked_io=*/true, /*budget_mb=*/50 },
-        { "D1: Chunked I/O 10MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true, 10 },
-        { "D1: Chunked I/O 5MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 5  },
-        { "D1: Chunked I/O 2MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 2  },
-        { "D1: Chunked I/O 1MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true, 1  },
-        { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, true,  true,  true, 50 },
+        { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true,  50, false },
+        { "D1: Chunked I/O 10MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true,  10, false },
+        { "D1: Chunked I/O 5MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true,  5, false },
+        { "D1: Chunked I/O 2MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true,  2, false },
+        { "D1: Chunked I/O 1MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true,  1, false },
+        { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, true,  true,  true,  50, false },
+
+        { "D2: mmap (A9+mmap)",                                                                  true,  false, true,  true,  true,  true,  false, false, false, true,  false, 50,    true },
+        { "D2+All: mmap+everything",                                                             true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50,    true },
+        { "D2+C1C2: mmap+reuse",                                                                 true,  true,  true,  true,  true,  true,  false, false, false, true,  false, 50,    true },
 
         { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false },
         { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, true,  false, false },
