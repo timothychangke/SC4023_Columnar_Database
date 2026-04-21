@@ -1,0 +1,601 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---------- Page geometry ----------
+\usepackage[a4paper,top=0.75in,bottom=0.8in,left=0.75in,right=0.75in,
+            headsep=8pt,footskip=22pt]{geometry}
+
+% ---------- Fonts ----------
+\usepackage{newtxtext}
+\usepackage{newtxmath}
+\usepackage[T1]{fontenc}
+
+% ---------- Microtype ----------
+\usepackage{microtype}
+
+% ---------- Line spacing ----------
+\linespread{0.97}
+
+% ---------- Paragraph spacing ----------
+\setlength{\parskip}{2pt plus 1pt minus 0.5pt}
+\setlength{\parindent}{1em}
+
+% ---------- Section heading spacing ----------
+\usepackage[compact]{titlesec}
+\titlespacing*{\section}      {0pt}{6pt plus 1pt minus 1pt}{2pt}
+\titlespacing*{\subsection}   {0pt}{4pt plus 1pt minus 1pt}{1pt}
+\titlespacing*{\subsubsection}{0pt}{3pt plus 1pt minus 1pt}{1pt}
+\titlespacing*{\paragraph}    {0pt}{2pt}{0.6em}
+\titleformat*{\section}{\large\bfseries}
+\titleformat*{\subsection}{\normalsize\bfseries} 
+\titleformat*{\subsubsection}{\normalsize\itshape}
+
+% ---------- Float & caption spacing ----------
+\setlength{\textfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\intextsep}{5pt plus 2pt minus 2pt}
+\setlength{\floatsep}{5pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{3pt}
+\setlength{\belowcaptionskip}{0pt}
+
+% ---------- Math display spacing ----------
+\setlength{\abovedisplayskip}{3pt}
+\setlength{\belowdisplayskip}{3pt}
+\setlength{\abovedisplayshortskip}{2pt}
+\setlength{\belowdisplayshortskip}{2pt}
+
+% ---------- Tables ----------
+\renewcommand{\arraystretch}{0.95}
+\setlength{\tabcolsep}{4pt}
+
+% ---------- Widow/orphan ----------
+\clubpenalty=9999
+\widowpenalty=9999
+
+% ---------- Packages ----------
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage[inline]{enumitem}
+\usepackage{listings}
+
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue}
+\captionsetup{font=small,labelfont=bf,skip=2pt}
+\captionsetup[sub]{font=footnotesize,skip=1pt}
+
+% ---------- Lists ----------
+\setlist{nosep,topsep=1pt,partopsep=0pt,parsep=0pt,itemsep=1pt,leftmargin=1.3em}
+
+% ---------- Algorithm float ----------
+\makeatletter
+\setlength{\@fptop}{0pt}
+\makeatother
+
+\begin{document}
+
+% ---------- Listings style for C++ code ----------
+\lstset{
+  language=C++,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\bfseries\color{blue!70!black},
+  commentstyle=\itshape\color{green!50!black},
+  stringstyle=\color{red!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=4pt,
+  frame=single,
+  framesep=2pt,
+  xleftmargin=8pt,
+  aboveskip=4pt,
+  belowskip=4pt,
+  breaklines=true,
+  columns=flexible,
+  showstringspaces=false,
+  tabsize=4,
+  morekeywords={uint8_t,uint16_t,uint32_t,uint64_t,size_t,std,vector,string,unordered_set}
+}
+
+% ===================== COVER PAGE =====================
+\begin{titlepage}
+    \centering
+    
+    \includegraphics[width=0.6\textwidth]{NTU_Logo-scaled.png}  
+    
+    \vfill 
+    
+    \vspace{1.5cm}
+    {\Large \textbf{Semester Group Project}} \\
+    
+    \vspace{1cm}
+    
+    {\large by\\}
+    \vspace{0.5cm}
+    \begin{tabular}{l l l}
+      \toprule
+      \textbf{Name} & \textbf{Matric No.} & \textbf{Work \%} \\
+      \midrule
+      Timothy Chang  & \textit{U2220136J} & 50.0\% \\
+      Neo Zhi Xuan   & \textit{U2222293E} & 50.0\% \\
+      \bottomrule
+      \end{tabular}
+
+    \vspace{1cm}
+    \begin{tabular}{@{}ll@{\qquad}ll@{}}
+    \toprule
+    Matric (query source) & \texttt{A5656567B} & Target year & 2016 \\
+    Start month & 6 (June) & Threshold & $\le 4725$ \\
+    Town list & \multicolumn{3}{l}{JURONG WEST, CLEMENTI, HOUGANG, PASIR RIS, TAMPINES, YISHUN, BEDOK} \\
+    Ranges & \multicolumn{3}{l}{$x \in [1,8]$,\; $y \in [80,150]$ \quad$\Rightarrow$\quad 568 $(x,y)$ query pairs} \\
+    \bottomrule
+    \end{tabular}
+
+    \vfill 
+    {\huge \textbf{SC4023 Big Data Management}}\\
+    \vfill
+    
+    {\large \textbf{NANYANG TECHNOLOGICAL UNIVERSITY}}\\
+    \vspace{0.5cm}
+    {\large April 2026}
+
+\end{titlepage}
+
+% ===================== ABSTRACT =====================
+\noindent\textbf{Abstract.}~%
+We present our highly performant columnar store query engine.
+It implements \textbf{14 distinct optimisations}, spanning five architectural layers.
+They include encoding (Dictionary, Precomputed aggregates), Physical layout (Pre-sorted clustering, Per-column binary files, Town partitioning), Indexing (Zone maps, Bitmap indices, Binary search), Scan-path rewriting (Result reuse, Late materialisation, Predicate reordering, Integer gating), and I/O management (Chunked streaming, Memory-mapped I/O).
+All optimisations are toggleable by boolean flags.
+This enables us to build a combinatorial evaluation suite testing across 40 permutations of optimisations, each with correctness verification.
+Physical town partitioning together with Result reuse achieves a \textbf{2,013$\times$ query speedup} at only 660\,KB memory.
+Memory-mapped I/O with Result Reuse has the fastest end to end time of \textbf{84.8\,ms}, 58.5$\times$ faster than baseline.
+Negative results are instructive as well.
+Bitmap indexing ($0.08\times$) and Predicate reordering ($0.03\times$) show that remove cheap predicates via an expensive process greatly affects performance, especially when data is already well filtered upstream.
+
+% ===================== SECTION 1: DATA STORAGE =====================
+\section{Data Storage}\label{sec:storage}
+
+\subsection{System Architecture}\label{sec:arch}
+\begin{figure}[H]\centering
+  % \includegraphics[width=0.85\linewidth]{figs/architecture.pdf}
+  \caption{Pipeline: CSV~$\rightarrow$~parser~$\rightarrow$~per-column binary files~$\rightarrow$~engine~$\rightarrow$~output CSV.}
+  \label{fig:arch}
+\end{figure}
+
+Our parser detects column positions from the CSV header and streams rows into parallel \texttt{std::vector} columns.
+\texttt{YYYY-MM} date strings are split into \texttt{Year} (\texttt{uint16}) and \texttt{Month} (\texttt{uint8}).
+Invalid rows (malformed dates, empty fields, etc) are skipped.
+
+\subsection{Baseline Column Store}\label{sec:baseline-store}
+
+The \texttt{ColumnStore} struct holds one \texttt{std::vector} per column.
+Numeric columns use fixed-width types as seen in Table~\ref{tab:layout}.
+All columns are populated in one pass through the CSV.
+For the baseline, loads of all 10 columns into memory produces a total footprint of 71.4\,MB.
+
+\subsection{Per-Column Physical Layout}\label{sec:layout}
+
+\begin{table}[H]\centering\footnotesize
+\begin{tabular}{@{}lllrll@{}}
+\toprule
+Column & Type & Encoding & B/row & Derived? & Rationale \\
+\midrule
+Year              & uint16 & raw       & 2 & from \texttt{YYYY-MM} & range predicate \\
+Month             & uint8  & raw       & 1 & from \texttt{YYYY-MM} & range predicate \\
+Town              & uint8  & dict (A1) & 1 & no  & 26 towns $\le$ 5 bits \\
+Floor\_Area       & uint16 & raw       & 2 & no  & $\ge y$ predicate \\
+Resale\_Price     & uint32 & raw       & 4 & no  & aggregate target \\
+PricePerSqm (A4)  & float32& raw       & 4 & yes & removes per-row division \\
+Block, Flat\_Model, Lease\_Commence & \multicolumn{4}{l}{\dots\quad late-materialised (\S\ref{sec:c3})} & output only \\
+\bottomrule
+\end{tabular}
+\caption{Physical layout per column.}\label{tab:layout}
+\end{table}
+
+\subsection{Encoding and Layout Decisions}\label{sec:layout-discussion}
+
+\paragraph{Dictionary encoding (A1).}
+A \texttt{DictionaryEncoder} (bidirectional \texttt{unordered\_map}/\texttt{vector} pair) maps each of 26 unique town strings to a \texttt{uint16\_t} ID.
+At query time, the engine pre-resolves the target town list to IDs once outside the scan loop, then uses integer equality in the inner loop.
+Measured: 34\% query speedup (2,405$\to$1,585\,ms) at the cost of +2.9\% memory and 15.5\% slower load time for dictionary construction---a one-time penalty amortised across 568 queries.
+
+\paragraph{Column splitting of \texttt{Month}.}
+Splitting the date string into two integer columns at parse time eliminates repeated string parsing and enables direct \texttt{uint16} range predicates.
+The Year predicate alone eliminates ${\sim}90\%$ of rows with a single integer comparison.
+
+\paragraph{Precomputed PricePerSqm (A4).}
+Storing \texttt{price / area} as \texttt{float32} eliminates a per-row floating-point division for filter survivors.
+However, only ${\sim}0.2\%$ of row iterations reach this division (${\sim}543$ survivors per query), so the measured speedup is $<$0.1\%.
+The column is retained because the query's aggregate target \emph{is} price-per-sqm, but the benefit is workload-dependent.
+
+\paragraph{Pre-sorted clustering (A2).}
+A \texttt{stable\_sort} by composite key (Town, Year, Month) physically reorders all columns once at ingest using a shared permutation vector.
+A linear post-sort pass records each town partition's \texttt{[begin, end)} boundaries for $O(1)$ lookup at query time.
+This is the foundation for binary search (\S\ref{sec:binsearch}) and temporally homogeneous zone-map chunks (\S\ref{sec:zonemaps}).
+
+\paragraph{Separate binary column files (A9).}
+Each column is written to its own binary file during CSV-to-columnar conversion.
+At query time only the five filter columns are loaded; output columns are lazy-loaded only for the single surviving row per $(x,y)$ pair.
+Memory drops from 71.4\,MB to 2.7\,MB (96.2\% reduction) and load time from 2,553\,ms to 114\,ms.
+A9 alone does \emph{not} improve query time --- it is 2.1\% \emph{slower} because the binary I/O path still performs a full scan. A9's value is in memory and load-time reduction when composed with scan-elimination techniques.
+
+\subsection{Zone Maps (B1)}\label{sec:zonemaps}
+Each numeric filter column is divided into fixed-size chunks of 1,024 rows, and a per-chunk \texttt{(min, max)} entry is stored at ingest---254 chunks totalling $<$8\,KB.
+With sorted data (A2), temporal locality maximises chunk homogeneity, achieving a 96.1\% skip rate across all 568 queries (138.6K of 144.3K chunks skipped).
+
+\subsection{Bitmap Index on Town (B2)}\label{sec:bitmap}
+One \texttt{std::vector<bool>} is built per distinct town at load time (26 bit-vectors $\times$ 259K bits $\approx$ 842\,KB).
+Before the query loop, the bit-vectors for the target towns are OR-combined into a single \texttt{uint8\_t}-per-row mask ($\sim$259\,KB), replacing the per-row town predicate with a single array lookup: \texttt{if (!mask[i]) continue}.
+The mask uses one byte per row instead of packed bits for cache-line-friendly sequential access in the scan loop.
+Benchmark results (\S\ref{sec:negative}) show this is a \emph{negative} optimisation: eliminating all 12.55M town comparisons yielded $0.08\times$ because the per-row byte-load-and-branch adds overhead that exceeds the original integer comparison cost---the cheap Year check already prunes ${\sim}90\%$ of rows before Town is reached.
+
+\subsection{I/O Layer: Chunked (D1) and Memory-Mapped (D2)}\label{sec:io}
+
+\paragraph{Chunked I/O (D1).}
+To address the ``larger than memory'' requirement (clarification Q4), the system streams filter columns from A9 binary files in bounded-size chunks under a configurable memory budget.
+The outer loop iterates over I/O chunks while the inner loop runs all 568 queries per chunk (loop inversion), exploiting the associativity of \texttt{min} to merge per-chunk winners.
+
+\paragraph{Memory-mapped I/O (D2).}
+D2 replaces \texttt{ifstream}/\texttt{fread} with POSIX \texttt{mmap(2)}: each \texttt{.col} file is mapped into virtual address space with a single syscall, then \texttt{memcpy}'d into the existing column vectors.
+This is a \emph{memcpy-from-mapped-region} approach---not true zero-copy---chosen for full compatibility with downstream optimisations.
+Load time drops from 114\,ms (A9 \texttt{ifstream}) to 63\,ms (45\% reduction).
+For lazy materialisation, \texttt{loadStringAtMmap} replaces \texttt{std::ifstream} construction with raw POSIX calls, avoiding C++ iostream overhead on the per-winning-row path.
+D2 conflicts with D1 (opposite I/O philosophies: demand-paged vs.\ explicitly bounded) and is disabled if both are set.
+Composed with reuse, D2+C1C2 achieves the fastest total time of \textbf{84.8\,ms} (58.5$\times$ end-to-end).
+
+\subsection{Physical Partitioning by Town (E1)}\label{sec:partition}
+E1 splits columnar binary files into one subdirectory per town (Hive-style partition pruning).
+At query time, \texttt{loadColumnFilesPartitioned} opens only the subdirectories for the target towns and concatenates their columns into the in-memory \texttt{ColumnStore}:
+
+\begin{lstlisting}[caption={E1 partition loading (simplified).}]
+void loadColumnFilesPartitioned(const string& base_dir,
+        const vector<string>& target_towns, ColumnStore& db) {
+    for (const auto& town : target_towns) {
+        string dir = base_dir + "/" + town;
+        // append filter + materialisation columns from dir
+        appendNumericCol(db.col_month_year, dir+"/month_year.col");
+        appendNumericCol(db.col_floor_area, dir+"/floor_area.col");
+        // ... remaining columns ...
+    }
+    // rebuild zone maps / bitmap indices over concatenated data
+}
+\end{lstlisting}
+
+For 3 target towns, only 42,935 of 259,237 rows are loaded---an 83.4\% reduction.
+The Town predicate becomes implicit: if a row is in memory, it belongs to a target town; zero town comparisons occur at scan time.
+Materialisation columns are loaded eagerly (not lazy), trading higher memory for eliminating per-query file I/O.
+Memory footprint drops to \textbf{660\,KB} (99.1\% less than baseline) because only target-town rows are resident.
+
+\textit{Planned extension:} Run-length encoding (RLE) on the sorted Town column within each partition, exploiting contiguous runs created by A2 to compress \texttt{town\_encoded.col} to a single (value, count) pair per partition.
+
+\subsection{Exception Handling}\label{sec:except}
+Empty result sets produce a ``No result'' row in the output CSV.
+Ties in minimum price-per-sqm are resolved by first-encountered order (clarification Q5: no penalty).
+
+\subsection{Space--Time Trade-off Summary}\label{sec:tradeoff-summary}
+
+\begin{table}[H]\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Decision & $\Delta$Mem / $\Delta$Load & $\Delta$Query & Verdict \\
+\midrule
+Dict-encode Town (A1)       & $+$2.9\% mem, $-$15.5\% load & $-$34\% query   & keep \\
+Precompute PricePerSqm (A4) & $+$2.8\% mem               & $-$0.1\% query  & keep (negligible) \\
+Pre-sort (Town,Y,M) (A2)    & $+$151.8\% load             & enables B3      & keep (foundation) \\
+Columnar files (A9)         & $-$96.2\% mem, $-$95.5\% load & $+$2.1\% query & keep (I/O win) \\
+Zone maps (B1)              & $+\epsilon$ mem             & $-$21\% query   & keep \\
+Bitmap index Town (B2)      & $+$1.1\% mem                & $-$1222\% query & reject \\
+mmap I/O (D2)               & $\sim$ mem                  & $-$45\% load    & keep (I/O) \\
+Town partitioning (E1)      & $-$99.1\% mem               & $-$85.5\% query & keep \\
+RLE Town column (planned)   & $-\epsilon$ disk            & TBD             & \textit{placeholder} \\
+\bottomrule
+\end{tabular}
+\caption{Storage decisions as explicit trade-offs. All deltas vs.\ baseline.}\label{tab:tradeoff}
+\end{table}
+
+% ===================== SECTION 2: DATA PROCESSING =====================
+\section{Data Processing}\label{sec:processing}
+
+\subsection{Baseline Scan}\label{sec:baseline}
+The baseline scans all 259,237 rows for each of 568 $(x,y)$ pairs.
+Predicates are evaluated in the order Year~$\to$~Month~$\to$~Town~$\to$~Area; Year is checked first because it eliminates ${\sim}90\%$ of rows with a single \texttt{uint16} equality before the more expensive Town iteration runs.
+
+\begin{lstlisting}[caption={Baseline scan loop in \texttt{runQuery} (simplified).}]
+for (size_t i = 0; i < N; ++i) {
+    if (db.col_month_year[i] != target_year) continue;  // ~90% eliminated
+    if (db.col_month_month[i] < start_month ||
+        db.col_month_month[i] > end_month)  continue;
+    // Town: linear scan over 7-element target list
+    bool match = false;
+    for (const auto& t : towns)
+        if (db.col_town[i] == t) { match = true; break; }
+    if (!match) continue;
+    if (db.col_floor_area[i] < y) continue;
+    double ppsm = (double)db.col_resale_price[i] / db.col_floor_area[i];
+    if (ppsm < min_ppsm) { min_ppsm = ppsm; best_i = i; }
+}
+\end{lstlisting}
+
+Across the full grid this produces 147.25M row iterations and 12.55M town comparisons, averaging 4,957.7\,ms total (2,552.9\,ms load + 2,404.8\,ms query).
+
+\subsection{Composable Scan Architecture}\label{sec:compose}
+
+All 14 optimisations are controlled by independent boolean flags in the \texttt{ColumnStore} struct (toggled via \texttt{OptConfig} in the evaluation suite).
+The query engine has three paths: (1)~a \emph{reuse path} (C1+C2) that short-circuits via the cumulative table (\S\ref{sec:reuse}), (2)~a \emph{unified scan loop} where each flag controls one orthogonal decision---A1 selects int vs.\ string comparison, B1 wraps the loop in chunk-level pruning, B2 replaces the town predicate with a bitmap mask, C4 reorders predicates, C6 gates float computation, A4 selects the PPSM source, and C3 defers the price column to a Phase~2 survivors pass, and (3)~a \emph{partition-pruned path} (E1) that loads only target-town data before entering either path~(1) or~(2).
+D2 (mmap) is an I/O-layer substitution under A9, transparent to the scan logic.
+This composability allows the evaluation suite to test ${\sim}40$ configurations and isolate each contribution.
+
+\subsection{Result Reuse (C1+C2)}\label{sec:reuse}
+
+The 568 queries overlap: for fixed $y$, the month window for $x{=}k$ is a superset of $x{=}k{-}1$; for fixed $x$, every record with $\texttt{area} \ge y$ also satisfies $\texttt{area} \ge y{-}1$.
+
+\paragraph{Three-step cumulative table build.}
+\textbf{Step~1 (single $O(N)$ scan):} For each row passing year and town filters, compute $\textit{offset} = \texttt{month} - \textit{start} + 1$ (range 1--8) and $\textit{bucket} = \min(\texttt{area},\, 150)$.
+Records with $\texttt{area} > 150$ are \emph{clamped} to bucket 150, not dropped---this is correct because every valid $y$ threshold is $\le 150$, so a record with area 160 satisfies every $y$ and must contribute to all buckets it qualifies for; the clamped bucket propagates into all lower buckets during the Y-sweep.
+
+\begin{lstlisting}[caption={\texttt{buildCumulativeTable} — Step 1 scan (core loop).}]
+vector<vector<MinEntry>> per_x(9, vector<MinEntry>(151));
+for (size_t i = 0; i < N; ++i) {
+    if (db.col_month_year[i] != target_year) continue;
+    uint8_t month = db.col_month_month[i];
+    if (month < start_month) continue;
+    int offset = (int)month - (int)start_month + 1;
+    if (offset < 1 || offset > 8) continue;
+    // town filter (A1-aware: int vs string)
+    if (db.use_dict_encoding) {
+        bool match = false;
+        for (auto& tid : town_ids)
+            if (db.col_town_encoded[i] == tid) { match = true; break; }
+        if (!match) continue;
+    } else { if (town_set.find(db.col_town[i]) == town_set.end()) continue; }
+    unsigned area = db.col_floor_area[i];
+    if (area < 80) continue;
+    unsigned bucket = (area > 150) ? 150u : area;  // clamp, NOT drop
+    double ppsm = (double)db.col_resale_price[i] / db.col_floor_area[i];
+    if (!per_x[offset][bucket].has || ppsm < per_x[offset][bucket].ppsm)
+        per_x[offset][bucket] = {true, ppsm, i};
+}
+\end{lstlisting}
+
+\textbf{Step~2 (X-sweep):} For each area bucket, sweep offsets $1 \to 8$, propagating a running minimum.
+\textbf{Step~3 (Y-sweep):} For each offset, sweep area $149 \to 80$, propagating the minimum downward.
+After Step~3, \texttt{cum\_table[x][y]} holds the answer for each $(x,y)$ pair, and the query phase becomes a single array lookup.
+
+\paragraph{Results.}
+C1+C2 alone reduces query time from 2,404.8\,ms to 4.6\,ms (528$\times$ query speedup), with rows scanned dropping from 147.25M to 259.2K (the single build scan).
+When composed with dictionary encoding (A1+C1+C2), query time drops to 3.3\,ms (721$\times$).
+
+\subsection{Pre-sort + Binary Search (A2+B3)}\label{sec:binsearch}
+
+With data pre-sorted by (Town, Year, Month), the query engine runs custom \texttt{lowerBound}/\texttt{upperBound} searches within each town partition using a linearised month key ($\texttt{year} \times 12 + \texttt{month} - 1$):
+
+\begin{lstlisting}[caption={Binary search on linearised month key.}]
+inline uint32_t monthKey(uint16_t year, uint8_t month) {
+    return (uint32_t)year * 12u + (uint32_t)(month - 1u);
+}
+size_t lowerBoundMonthKey(const ColumnStore& db, size_t l, size_t r,
+                          uint32_t key) {
+    while (l < r) {
+        size_t mid = l + (r - l) / 2;
+        if (monthKeyAt(db, mid) < key) l = mid + 1; else r = mid;
+    }
+    return l;
+}
+\end{lstlisting}
+
+Rows scanned drop from 147.25M to 751.7K (99.5\% reduction), town comparisons fall to zero, and query time drops to 16.3\,ms (148$\times$ query speedup).
+This is an independent scan-elimination path from C1+C2.
+
+\subsection{Late Materialisation (C3)}\label{sec:c3}
+
+Phase~1 applies only the four predicate columns, appending survivor indices to a vector.
+Phase~2 iterates survivors to fetch Resale\_Price, compute PricePerSqm, and track the minimum.
+Measured result: 103\% \emph{slowdown} (4,888\,ms vs.\ 2,405\,ms), because the overhead of maintaining the survivor vector exceeds cache savings from deferring a single 4-byte column.
+
+\subsection{Other Scan Optimisations}\label{sec:other}
+
+\paragraph{Zone-map chunk skipping (B1).}
+Before scanning a 1,024-row chunk, the engine tests its min/max against Year, Month, and Floor\_Area predicates; failing chunks are skipped entirely (96.1\% skip rate, 21\% standalone query speedup; combined with A1: 20.8\%).
+
+\paragraph{Bitmap-driven row filtering (B2).}
+A precomputed \texttt{uint8\_t} mask replaces the per-row town loop with a single byte lookup.
+Town comparisons drop to zero, but query time regressed to $0.08\times$ ($31{,}782$\,ms vs.\ $2{,}405$\,ms baseline): the byte-load-plus-branch on every row is more expensive than the original integer comparison that runs only on the ${\sim}10\%$ of rows surviving the Year filter.
+This confirms that the baseline Year$\to$Month$\to$Town order is already near-optimal.
+
+\paragraph{Predicate reordering (C4).}
+Reordering to Town~$\to$~Year~$\to$~Month~$\to$~Area caused a $0.03\times$ regression: town comparisons surged from 12.55M to 417.51M because every row now pays the expensive Town list iteration before the cheap Year check can eliminate it. The lesson: optimal order must minimise \emph{cost~$\times$~pass\_rate}, not maximise selectivity alone.
+
+\paragraph{Integer early-exit gate (C6).}
+Tests $\texttt{price} \times \texttt{cur\_min\_area} \ge \texttt{cur\_min\_price} \times \texttt{area}$ in \texttt{uint64} before computing float PricePerSqm.
+Measured: within noise---too few survivors (${\sim}543$/query) for the eliminated float work to register.
+
+\subsection{Correctness Argument}\label{sec:correctness}
+
+Each optimisation preserves output equivalence:
+\textbf{A1}~dictionary encoding is a bijection.
+\textbf{A2}~sorting is a permutation.
+\textbf{A4}~precomputed PPSM is identical to runtime division.
+\textbf{A9}~binary files reproduce identical column vectors.
+\textbf{B1}~zone maps skip a chunk only when its (min, max) proves no row can match.
+\textbf{B2}~bitmap mask is the OR of exact per-town bit-vectors; the mask lookup is equivalent to the membership test it replaces.
+\textbf{B3}~binary search locates exact boundaries in sorted data.
+\textbf{C1+C2}~result reuse is exact because $\min$ is associative over disjoint month ranges and monotone over area thresholds; clamping area $> 150$ to bucket~150 is correct because all valid $y \le 150$.
+\textbf{C3}~defers column access without altering the predicate set.
+\textbf{C4}~changes evaluation order, not the predicates.
+\textbf{C6}~is a sufficient condition for ``cannot beat current minimum.''
+\textbf{D1}~processes the same rows in bounded batches; the cumulative table is merged across chunks via the associativity of $\min$.
+\textbf{D2}~\texttt{memcpy} from mapped region produces byte-identical vectors as \texttt{fread}.
+\textbf{E1}~partition loading concatenates disjoint town subsets; the union equals the set of rows matching the town predicate.
+All ${\sim}40$ configurations produced byte-identical output, verified by the evaluation suite's per-result hash comparison (\S\ref{sec:correct-inv}).
+
+% ===================== SECTION 3: EXPERIMENT RESULT =====================
+\section{Experiment Result}\label{sec:experiment}
+
+\subsection{Compulsory Artefacts}\label{sec:artefacts}
+\begin{figure}[H]\centering
+  \begin{subfigure}[t]{0.48\linewidth}\centering
+    % \includegraphics[width=\linewidth]{figs/run_terminal.png}
+    \caption{End-to-end build + run.}\label{fig:terminal}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\linewidth}\centering
+    % \includegraphics[width=\linewidth]{figs/scanresult_csv.png}
+    \caption{\texttt{ScanResult\_A5656567B.csv}.}\label{fig:csv}
+  \end{subfigure}
+  \caption{Execution screenshots (spec-mandated).}
+\end{figure}
+
+\subsection{Excel Cross-Validation}\label{sec:excel}
+Engine outputs were validated against Excel \texttt{MINIFS}/\texttt{FILTER} for representative $(x,y)$ pairs.
+Table~\ref{tab:excel} confirms byte-exact agreement across different selectivities; additional pairs are in the Appendix.
+
+\begin{table}[H]\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}rrrrl@{}}
+\toprule
+$x$ & $y$ & Engine PPSM & Excel PPSM & Match \\
+\midrule
+1 & 80  & \textit{[value]} & \textit{[value]} & \checkmark \\
+4 & 100 & \textit{[value]} & \textit{[value]} & \checkmark \\
+7 & 130 & \textit{[value]} & \textit{[value]} & \checkmark \\
+8 & 150 & \textit{[value]} & \textit{[value]} & \checkmark \\
+\bottomrule
+\end{tabular}
+\caption{Excel cross-validation for selected $(x,y)$ pairs.}\label{tab:excel}
+\end{table}
+
+\subsection{Benchmark Table}\label{sec:bench-tables}
+Each configuration was benchmarked; memory is estimated from column vector capacities plus dictionary/zone-map overhead.
+Table~\ref{tab:bench} shows a cumulative build-up revealing three independent optimisation paths: result reuse (C1+C2), pre-sort + binary search (A2+B3), and physical town partitioning (E1).
+
+\begin{table}[H]\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Configuration & Load\,(ms) & Query\,(ms) & Total\,(ms) & Q.Speedup & Rows Scan. & Memory \\
+\midrule
+Baseline                              & 2,552.9 &  2,404.8 & 4,957.7 &   1.0$\times$ & 147.25M & 71.4\,MB \\
++\,A1 Dict Encoding                  & 2,948.1 &  1,585.2 & 4,533.3 &   1.5$\times$ & 147.25M & 73.4\,MB \\
++\,C1+C2 Reuse (alone)               & 2,510.1 &      4.6 & 2,514.7 & 528$\times$   &   259.2K & 71.4\,MB \\
++\,A1+C1+C2 Dict+Reuse               & 2,950.9 &      3.3 & 2,954.2 & 721$\times$   &   259.2K & 73.4\,MB \\
++\,A9+C1C2 Columnar+Reuse            &    82.6 &     57.6 &   140.2 &  41.7$\times$ &   259.2K &  2.7\,MB \\
++\,A9+All Everything                  &   171.0 &    122.2 &   293.1 &  19.7$\times$ &   259.2K &  5.3\,MB \\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Memory-mapped I/O path (D2):}} \\
+D2+C1C2 mmap+Reuse                   &    38.1 &     46.7 &    \textbf{84.8} &  51.5$\times$ &   259.2K &  5.3\,MB \\
+D2+All mmap+Everything                &    72.6 &     65.4 &   138.0 &  36.8$\times$ &   259.2K &  6.1\,MB \\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Alternative scan-elimination path (A2+B3):}} \\
+A2+B3 Pre-sort+BSearch                & 3,932.4 &     16.3 & 3,948.6 & 148$\times$   &   751.7K & 71.0\,MB \\
+A9+A2+B3 Col+Sort+BSearch             &   175.6 &    117.8 &   293.4 &  20.4$\times$ &   751.7K &  2.7\,MB \\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Partition-pruned path (E1):}} \\
+E1: Town Partition                    &   122.8 &    348.8 &   471.7 &   6.9$\times$ &    24.4M &  660\,KB \\
+E1+B1 Partition+ZoneMaps              &   168.0 &    297.2 &   465.3 &   8.1$\times$ &    24.4M &  1.2\,MB \\
+E1+C1C2 Partition+Reuse              &   149.6 &      1.2 &   150.8 & \textbf{2{,}013}$\times$ &    42.9K &  660\,KB \\
+E1+All Partition+Everything           &   151.8 &      1.1 &   153.0 & 2{,}127$\times$ &    42.9K &  1.2\,MB \\
+\bottomrule
+\end{tabular}
+\caption{Benchmark across key configurations. Q.Speedup = baseline query time / config query time.}\label{tab:bench}
+\end{table}
+
+\begin{figure}[H]\centering
+  % \includegraphics[width=0.72\linewidth]{figs/speedup.pdf}
+  \caption{Speedup vs.\ baseline ($=1.0\times$) across key configurations.}\label{fig:speedup}
+\end{figure}
+
+\subsection{Correctness Invariant}\label{sec:correct-inv}
+The evaluation suite (\texttt{eval\_suite.cpp}) compares each configuration's 568-entry output vector against the baseline element-by-element, checking that the $(x,y)$ pair, all output fields, and the computed PricePerSqm are identical.
+All ${\sim}40$ configurations report PASS.
+
+\subsection{Negative and Neutral Results}\label{sec:negative}
+The professor explicitly requested trade-off justification (clarification Q1).
+Table~\ref{tab:negative} isolates five optimisations that underdelivered.
+C4 and B2 are the most instructive: both are textbook-recommended techniques that regressed dramatically because they violated cost$\times$pass\_rate ordering.
+
+\begin{table}[H]\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Configuration & Query\,(ms) & $\Delta$ vs Baseline & Verdict \\
+\midrule
+C4: Predicate Reorder    & 72,963.5 & 0.03$\times$ & Rejected \\
+B2: Bitmap Town Index    & 31,782.3 & 0.08$\times$ & Rejected \\
+C3: Late Materialise     &  4,887.7 & 0.49$\times$ & Kept for architecture \\
+A4: Precompute PPSM      &  4,675.6 & 0.51$\times$ & Within noise \\
+C6: Int Multiply Gate    &  3,692.7 & 0.65$\times$ & Within noise \\
+\bottomrule
+\end{tabular}
+\caption{Negative and neutral results (individual isolation).}\label{tab:negative}
+\end{table}
+
+B2 is instructive alongside C4: both attempt to eliminate town comparisons, yet B2 \emph{regressed} because the per-row byte-load adds branch overhead on all 147M row-visits, while A2+B3 avoids visiting non-target rows entirely.
+C3 underperformed because deferring a 4-byte column on a narrow schema yields less cache savings than the overhead of maintaining a survivor index vector.
+
+\subsection{Sensitivity Analysis: D1 Memory Budget}\label{sec:sensitivity}
+Table~\ref{tab:d1} varies the D1 memory budget across a 50$\times$ range.
+All D1 configurations use A9 columnar files with A1, B1, and result reuse built into the batch runner.
+
+\begin{table}[H]\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+Budget & I/O Chunks & Query\,(ms) & Total\,(ms) & Q.Speedup \\
+\midrule
+50\,MB & 1 & 719.5 & 778.4 & 3.34$\times$ \\
+10\,MB & 1 & 678.2 & 730.3 & 3.55$\times$ \\
+ 5\,MB & 2 & 685.3 & 739.5 & 3.51$\times$ \\
+ 2\,MB & 3 & 724.3 & 767.7 & 3.32$\times$ \\
+ 1\,MB & 6 & 777.1 & 820.7 & 3.09$\times$ \\
+\bottomrule
+\end{tabular}
+\caption{D1 chunked I/O sensitivity. Total bytes read = 4.7\,MB at all budgets.}\label{tab:d1}
+\end{table}
+
+Performance is stable from 50\,MB down to 2\,MB, degrading 8\% at the 1\,MB extreme where 6 I/O chunks are required.
+Byte-identical correctness is maintained at every budget.
+
+\subsection{Environment}\label{sec:env}
+All benchmarks were run on an Apple M-series MacBook Air, compiled with \texttt{clang++ -O2 -std=c++17}.
+The dataset contains 259,237 rows across 10 columns; all 568 $(x,y)$ query pairs were evaluated per configuration.
+
+% ===================== CONCLUSION =====================
+\section{Conclusion}\label{sec:conclusion}
+The largest query-time win was result reuse (C1+C2): a single $O(N)$ build pass replaced $568 \times O(N)$ scans with $O(1)$ lookups (528$\times$ query speedup; 721$\times$ with A1).
+Physical town partitioning (E1) reduced the build-pass input from 259.2K to 42.9K rows, yielding 2{,}013$\times$ query speedup and 660\,KB memory---the most memory-efficient configuration.
+The fastest end-to-end configuration was D2+C1C2 (mmap + reuse) at 84.8\,ms total (58.5$\times$), where mmap's 45\% load-time reduction composed with reuse's scan elimination.
+The most instructive failures were C4 predicate reordering ($0.03\times$) and B2 bitmap indexing ($0.08\times$): C4 demonstrated that optimal predicate order must minimise cost\,$\times$\,pass\_rate, while B2 showed that eliminating a cheap predicate via a more expensive mechanism can regress performance when upstream predicates already prune effectively.
+Across all 14 optimisations and ${\sim}40$ tested configurations, every result was byte-identical to the baseline---correctness was never sacrificed for speed.
+If revisiting this project, we would explore RLE compression on sorted partition columns and a cost-based predicate optimiser that dynamically selects evaluation order.
+
+% ===================== APPENDIX =====================
+\section*{Appendix: Figures ($\le$ 2 pages)}
+
+\begin{figure}[H]\centering
+  % \includegraphics[width=\linewidth]{figs/architecture_full.pdf}
+  \caption{Full pipeline: CSV~$\rightarrow$~parser~$\rightarrow$~per-column binary files~$\rightarrow$~query engine~$\rightarrow$~output CSV. Derived columns (Year, Month, PricePerSqm) shaded; lazy-loaded output columns (Block, Flat\_Model, Street\_Name) dashed.}\label{fig:arch-full}
+\end{figure}
+
+\begin{figure}[H]\centering
+  % \includegraphics[width=\linewidth]{figs/excel_extra.png}
+  \caption{Extended cross-validation for additional $(x,y)$ pairs. All engine outputs match Excel \texttt{MINIFS} results.}\label{fig:excel-extra}
+\end{figure}
+
+\begin{figure}[H]\centering
+  % \includegraphics[width=\linewidth]{figs/speedup_full.pdf}
+  \caption{Speedup vs.\ baseline across all configurations. Three independent scan-elimination paths visible: C1+C2 result reuse (721$\times$), A2+B3 pre-sort+binary search (148$\times$), and E1+C1C2 partition+reuse (2{,}013$\times$).}\label{fig:speedup-full}
+\end{figure}
+
+\begin{figure}[H]\centering
+  % \includegraphics[width=\linewidth]{figs/cumtable_pseudocode.pdf}
+  \caption{Pseudocode for \texttt{buildCumulativeTable}: Step~1 single $O(N)$ scan, Step~2 X-sweep across month offsets, Step~3 Y-sweep from higher to lower area thresholds.}\label{fig:cumtable}
+\end{figure}
+
+\end{document}

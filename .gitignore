@@ -6,6 +6,9 @@
 *.dll
 *.exe
 column_store
+eval_runner
+eval_suit
+eval_suite
 
 # Build directories
 build/
@@ -42,6 +45,14 @@ ScanResult_*.csv
 *.zone
 *.dict
 
+# Data directories
+data/columns_a2/
+data/columns_dict_a2/
+data/columns_dict_ppsm_a2/
+data/columns_e1_dict_a2/
+data/columns_e1_dict_ppsm_a2/
+data/columns_ppsm_a2/
+
 # Temporary files
 *.tmp
 *.log
@@ -64,3 +75,10 @@ latex/
 
 # Eval results
 /Project/results/*
+
+# LaTeX report files
+report/*.aux
+report/*.fdb_latexmk
+report/*.fls
+report/*.synctex.gz
+data/columns_*/
