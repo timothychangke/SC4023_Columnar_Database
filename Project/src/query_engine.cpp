@@ -243,10 +243,18 @@ void runQuery(const ColumnStore&              db,
         }
 
         if (db.use_columnar_files) {
-            result.town                = loadStringAt(db.column_dir + "/town.col", e.idx);
-            result.block               = loadStringAt(db.column_dir + "/block.col", e.idx);
-            result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", e.idx);
-            result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", e.idx);
+            result.town                = db.use_mmap_io
+                ? loadStringAtMmap(db.column_dir + "/town.col", e.idx)
+                : loadStringAt(db.column_dir + "/town.col", e.idx);
+            result.block               = db.use_mmap_io
+                ? loadStringAtMmap(db.column_dir + "/block.col", e.idx)
+                : loadStringAt(db.column_dir + "/block.col", e.idx);
+            result.flat_model          = db.use_mmap_io
+                ? loadStringAtMmap(db.column_dir + "/flat_model.col", e.idx)
+                : loadStringAt(db.column_dir + "/flat_model.col", e.idx);
+            result.lease_commence_date = db.use_mmap_io
+                ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", e.idx)
+                : loadUint16At(db.column_dir + "/lease_commence_date.col", e.idx);
         } else {
             result.town                = db.col_town[e.idx];
             result.block               = db.col_block[e.idx];
@@ -335,14 +343,19 @@ void runQuery(const ColumnStore&              db,
         result.floor_area          = db.col_floor_area[best_i];
         result.price_per_sqm       = min_ppsm;
 
-        // A9: lazy materialisation: read only the winning row from disk
         if (db.use_columnar_files) {
-            // A9: in column-file mode, display columns are not fully loaded.
-            // Read only the winning row from disk (lazy materialisation).
-            result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
-            result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
-            result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
-            result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
+            result.town                = db.use_mmap_io
+                ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
+                : loadStringAt(db.column_dir + "/town.col", best_i);
+            result.block               = db.use_mmap_io
+                ? loadStringAtMmap(db.column_dir + "/block.col", best_i)
+                : loadStringAt(db.column_dir + "/block.col", best_i);
+            result.flat_model          = db.use_mmap_io
+                ? loadStringAtMmap(db.column_dir + "/flat_model.col", best_i)
+                : loadStringAt(db.column_dir + "/flat_model.col", best_i);
+            result.lease_commence_date = db.use_mmap_io
+                ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", best_i)
+                : loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
         } else {
             result.town                = db.col_town[best_i];
             result.block               = db.col_block[best_i];
@@ -559,11 +572,18 @@ void runQuery(const ColumnStore&              db,
     result.price_per_sqm = min_ppsm;
 
     if (db.use_columnar_files) {
-        // A9: lazy materialisation : read only the winning row from disk
-        result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
-        result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
-        result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
-        result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
+        result.town                = db.use_mmap_io
+            ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
+            : loadStringAt(db.column_dir + "/town.col", best_i);
+        result.block               = db.use_mmap_io
+            ? loadStringAtMmap(db.column_dir + "/block.col", best_i)
+            : loadStringAt(db.column_dir + "/block.col", best_i);
+        result.flat_model          = db.use_mmap_io
+            ? loadStringAtMmap(db.column_dir + "/flat_model.col", best_i)
+            : loadStringAt(db.column_dir + "/flat_model.col", best_i);
+        result.lease_commence_date = db.use_mmap_io
+            ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", best_i)
+            : loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
     } else {
         result.town                = db.col_town[best_i];
         result.block               = db.col_block[best_i];
@@ -834,13 +854,21 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
     }
 
     // MATERIALISATION: lazy load display columns for the global winners.
+    // MATERIALISATION: lazy load display columns for the global winners.
     for (std::size_t slot = 0; slot < NSLOTS; ++slot) {
         if (results[slot].no_result) continue;
         const std::size_t g = best_global_idx[slot];
-        results[slot].town       = loadStringAt(base_db.column_dir + "/town.col", g);
-        results[slot].block      = loadStringAt(base_db.column_dir + "/block.col", g);
-        results[slot].flat_model = loadStringAt(base_db.column_dir + "/flat_model.col", g);
-        results[slot].lease_commence_date =
-            loadUint16At(base_db.column_dir + "/lease_commence_date.col", g);
+        results[slot].town       = base_db.use_mmap_io
+            ? loadStringAtMmap(base_db.column_dir + "/town.col", g)
+            : loadStringAt(base_db.column_dir + "/town.col", g);
+        results[slot].block      = base_db.use_mmap_io
+            ? loadStringAtMmap(base_db.column_dir + "/block.col", g)
+            : loadStringAt(base_db.column_dir + "/block.col", g);
+        results[slot].flat_model = base_db.use_mmap_io
+            ? loadStringAtMmap(base_db.column_dir + "/flat_model.col", g)
+            : loadStringAt(base_db.column_dir + "/flat_model.col", g);
+        results[slot].lease_commence_date = base_db.use_mmap_io
+            ? loadUint16AtMmap(base_db.column_dir + "/lease_commence_date.col", g)
+            : loadUint16At(base_db.column_dir + "/lease_commence_date.col", g);
     }
 }
