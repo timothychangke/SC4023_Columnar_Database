@@ -24,7 +24,7 @@
 #include <unistd.h>
 #include <cstring>
 
-static void writeDictionary(std::ofstream& f, const DictionaryEncoder& dict) {
+void writeDictionary(std::ofstream& f, const DictionaryEncoder& dict) {
     const uint32_t num_entries = static_cast<uint32_t>(dict.id_to_str.size());
     f.write(reinterpret_cast<const char*>(&num_entries), sizeof(num_entries));
 
@@ -42,7 +42,7 @@ static void writeDictionary(std::ofstream& f, const DictionaryEncoder& dict) {
  * Reconstructs both id_to_str and str_to_id with the same ID assignments
  * that were used during writing.
  */
-static void readDictionary(std::ifstream& f, DictionaryEncoder& dict) {
+void readDictionary(std::ifstream& f, DictionaryEncoder& dict) {
     dict.clear();
 
     uint32_t num_entries = 0;
@@ -796,4 +796,253 @@ uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
     ::munmap(addr, file_size);
     ::close(fd);
     return value;
+}
+
+// ============================================================================
+// E1: Town-Partitioned Column Files
+// ============================================================================
+
+void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_dir) {
+    if (db.town_partitions.empty()) {
+        throw std::runtime_error("E1: town_partitions is empty — requires A2 (presorted storage)");
+    }
+
+    std::filesystem::create_directories(base_dir);
+
+    // Helper lambdas — same format as writeColumnFiles but for a row range
+    auto writeNumericRange = [](const auto& vec, std::size_t begin, std::size_t end,
+                                const std::string& filepath) {
+        std::ofstream f(filepath, std::ios::binary);
+        if (!f.is_open()) throw std::runtime_error("E1: cannot open " + filepath);
+        const uint32_t N = static_cast<uint32_t>(end - begin);
+        f.write(reinterpret_cast<const char*>(&N), sizeof(N));
+        f.write(reinterpret_cast<const char*>(vec.data() + begin), N * sizeof(vec[0]));
+    };
+
+    auto writeStringRange = [](const std::vector<std::string>& col,
+                               std::size_t begin, std::size_t end,
+                               const std::string& filepath) {
+        std::ofstream f(filepath, std::ios::binary);
+        if (!f.is_open()) throw std::runtime_error("E1: cannot open " + filepath);
+        const uint32_t N = static_cast<uint32_t>(end - begin);
+        f.write(reinterpret_cast<const char*>(&N), sizeof(N));
+
+        std::vector<uint32_t> offsets(N + 1);
+        uint32_t running = 0;
+        for (uint32_t i = 0; i < N; ++i) {
+            offsets[i] = running;
+            running += static_cast<uint32_t>(col[begin + i].size());
+        }
+        offsets[N] = running;
+        f.write(reinterpret_cast<const char*>(offsets.data()), offsets.size() * sizeof(uint32_t));
+        for (std::size_t i = begin; i < end; ++i) {
+            f.write(col[i].data(), col[i].size());
+        }
+    };
+
+    for (const auto& [town_name, part] : db.town_partitions) {
+        if (!part.valid) continue;
+        const std::size_t begin = part.begin;
+        const std::size_t end   = part.end;
+
+        std::string town_dir = base_dir + "/" + town_name;
+        std::filesystem::create_directories(town_dir);
+
+        // Write a mini meta.col for this partition
+        {
+            std::ofstream f(town_dir + "/meta.col", std::ios::binary);
+            if (!f.is_open()) throw std::runtime_error("E1: cannot open meta.col in " + town_dir);
+            const uint32_t N = static_cast<uint32_t>(end - begin);
+            f.write(reinterpret_cast<const char*>(&N), sizeof(N));
+            uint8_t flags = 0;
+            if (db.use_dict_encoding)    flags |= 0x01;
+            if (db.use_precomputed_ppsm) flags |= 0x02;
+            f.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+            // Write dictionaries (same as global — needed for lazy materialisation)
+            writeDictionary(f, db.dict_town);
+            writeDictionary(f, db.dict_flat_type);
+            writeDictionary(f, db.dict_flat_model);
+            writeDictionary(f, db.dict_street_name);
+        }
+
+        // Filter columns
+        writeNumericRange(db.col_month_year,   begin, end, town_dir + "/month_year.col");
+        writeNumericRange(db.col_month_month,  begin, end, town_dir + "/month_month.col");
+        writeNumericRange(db.col_floor_area,   begin, end, town_dir + "/floor_area.col");
+        writeNumericRange(db.col_resale_price, begin, end, town_dir + "/resale_price.col");
+
+        if (db.use_dict_encoding) {
+            writeNumericRange(db.col_town_encoded, begin, end, town_dir + "/town_encoded.col");
+            writeNumericRange(db.col_flat_type_encoded,   begin, end, town_dir + "/flat_type_encoded.col");
+            writeNumericRange(db.col_flat_model_encoded,  begin, end, town_dir + "/flat_model_encoded.col");
+            writeNumericRange(db.col_street_name_encoded, begin, end, town_dir + "/street_name_encoded.col");
+        }
+        if (db.use_precomputed_ppsm) {
+            writeNumericRange(db.col_price_per_sqm, begin, end, town_dir + "/price_per_sqm.col");
+        }
+        writeNumericRange(db.col_lease_commence_date, begin, end, town_dir + "/lease_commence_date.col");
+
+        // Materialisation string columns (for lazy load of the winning row)
+        writeStringRange(db.col_town,         begin, end, town_dir + "/town.col");
+        writeStringRange(db.col_block,        begin, end, town_dir + "/block.col");
+        writeStringRange(db.col_flat_model,   begin, end, town_dir + "/flat_model.col");
+        writeStringRange(db.col_street_name,  begin, end, town_dir + "/street_name.col");
+        writeStringRange(db.col_flat_type,    begin, end, town_dir + "/flat_type.col");
+        writeStringRange(db.col_storey_range, begin, end, town_dir + "/storey_range.col");
+
+        std::cout << "  [E1] Partition '" << town_name << "': " << (end - begin) << " rows\n";
+    }
+
+    std::cout << "[E1] Partitioned column files written to: " << base_dir << "\n";
+}
+
+
+void loadColumnFilesPartitioned(const std::string& base_dir,
+                                const std::vector<std::string>& target_towns,
+                                ColumnStore& db) {
+    // Clear existing column data
+    db.col_month_year.clear();
+    db.col_month_month.clear();
+    db.col_floor_area.clear();
+    db.col_resale_price.clear();
+    db.col_town_encoded.clear();
+    db.col_price_per_sqm.clear();
+    db.col_town.clear();
+    db.col_block.clear();
+    db.col_flat_model.clear();
+    db.col_street_name.clear();
+    db.col_flat_type.clear();
+    db.col_storey_range.clear();
+    db.col_lease_commence_date.clear();
+    db.loaded_partition_dirs.clear();
+    db.total_rows = 0;
+
+    // We need dictionaries from any partition's meta.col (they're all identical)
+    bool dicts_loaded = false;
+
+    for (const auto& town : target_towns) {
+        std::string town_dir = base_dir + "/" + town;
+        std::ifstream test(town_dir + "/meta.col", std::ios::binary);
+        if (!test.is_open()) {
+            std::cout << "  [E1] WARNING: partition not found for town '" << town << "', skipping.\n";
+            continue;
+        }
+        test.close();
+
+        // Read this partition's meta
+        uint32_t part_N = 0;
+        {
+            std::ifstream f(town_dir + "/meta.col", std::ios::binary);
+            f.read(reinterpret_cast<char*>(&part_N), sizeof(part_N));
+            // Read flags (we already have them set on db from config.apply)
+            uint8_t flags = 0;
+            f.read(reinterpret_cast<char*>(&flags), sizeof(flags));
+
+            if (!dicts_loaded) {
+                readDictionary(f, db.dict_town);
+                readDictionary(f, db.dict_flat_type);
+                readDictionary(f, db.dict_flat_model);
+                readDictionary(f, db.dict_street_name);
+                dicts_loaded = true;
+            }
+        }
+
+        if (part_N == 0) continue;
+
+        // const std::size_t old_size = db.col_month_year.size();
+
+        // Helper: append a numeric column from a partition file
+        auto appendNumericCol = [&](auto& vec, const std::string& name) {
+            using T = typename std::remove_reference<decltype(vec)>::type::value_type;
+            std::ifstream f(town_dir + "/" + name, std::ios::binary);
+            if (!f.is_open()) throw std::runtime_error("E1: cannot open " + town_dir + "/" + name);
+            uint32_t file_N = 0;
+            f.read(reinterpret_cast<char*>(&file_N), sizeof(file_N));
+            if (file_N != part_N) {
+                throw std::runtime_error("E1: row count mismatch in " + name);
+            }
+            const std::size_t prev = vec.size();
+            vec.resize(prev + file_N);
+            f.read(reinterpret_cast<char*>(vec.data() + prev), file_N * sizeof(T));
+        };
+
+        appendNumericCol(db.col_month_year,   "month_year.col");
+        appendNumericCol(db.col_month_month,  "month_month.col");
+        appendNumericCol(db.col_floor_area,   "floor_area.col");
+        appendNumericCol(db.col_resale_price, "resale_price.col");
+
+        if (db.use_dict_encoding) {
+            appendNumericCol(db.col_town_encoded, "town_encoded.col");
+        }
+        if (db.use_precomputed_ppsm) {
+            appendNumericCol(db.col_price_per_sqm, "price_per_sqm.col");
+        }
+
+        // We still need town strings for lazy materialisation of winning row
+        // But we DON'T load them into the filter path — they're implicit.
+        // We store the partition dir so the query engine can lazy-load from it.
+        db.loaded_partition_dirs.push_back(town_dir);
+        db.total_rows += part_N;
+
+        std::cout << "  [E1] Loaded partition '" << town << "': " << part_N << " rows\n";
+        
+        // Load materialisation columns so post-scan can index by best_i
+        auto appendStringCol = [&](std::vector<std::string>& col, const std::string& name) {
+            std::ifstream f(town_dir + "/" + name, std::ios::binary);
+            if (!f.is_open()) throw std::runtime_error("E1: cannot open " + town_dir + "/" + name);
+            uint32_t file_N = 0;
+            f.read(reinterpret_cast<char*>(&file_N), sizeof(file_N));
+            std::vector<uint32_t> offsets(file_N + 1);
+            f.read(reinterpret_cast<char*>(offsets.data()), offsets.size() * sizeof(uint32_t));
+            const uint32_t blob_size = offsets[file_N];
+            std::vector<char> blob(blob_size);
+            f.read(blob.data(), blob_size);
+            const std::size_t prev = col.size();
+            col.resize(prev + file_N);
+            for (uint32_t i = 0; i < file_N; ++i) {
+                col[prev + i].assign(blob.data() + offsets[i], offsets[i+1] - offsets[i]);
+            }
+        };
+
+        appendStringCol(db.col_town,         "town.col");
+        appendStringCol(db.col_block,        "block.col");
+        appendStringCol(db.col_flat_model,   "flat_model.col");
+        appendStringCol(db.col_street_name,  "street_name.col");
+        appendStringCol(db.col_flat_type,    "flat_type.col");
+        appendStringCol(db.col_storey_range, "storey_range.col");
+        appendNumericCol(db.col_lease_commence_date, "lease_commence_date.col");
+    }
+
+    std::cout << "  [E1] Total rows loaded: " << db.total_rows
+              << " from " << db.loaded_partition_dirs.size() << " partitions\n";
+
+    // Rebuild zone maps if enabled
+    if (db.use_zone_maps) {
+        auto buildZM = [](const auto& col, ZoneMap& zm) {
+            const std::size_t N = col.size();
+            const std::size_t nc = (N + ZONE_CHUNK_SIZE - 1) / ZONE_CHUNK_SIZE;
+            zm.chunks.resize(nc);
+            for (std::size_t c = 0; c < nc; ++c) {
+                const std::size_t start = c * ZONE_CHUNK_SIZE;
+                const std::size_t end = std::min(start + ZONE_CHUNK_SIZE, N);
+                auto& entry = zm.chunks[c];
+                entry.min_val = std::numeric_limits<uint32_t>::max();
+                entry.max_val = 0;
+                for (std::size_t i = start; i < end; ++i) {
+                    const uint32_t v = static_cast<uint32_t>(col[i]);
+                    if (v < entry.min_val) entry.min_val = v;
+                    if (v > entry.max_val) entry.max_val = v;
+                }
+            }
+        };
+        buildZM(db.col_month_year,   db.zm_month_year);
+        buildZM(db.col_month_month,  db.zm_month_month);
+        buildZM(db.col_floor_area,   db.zm_floor_area);
+        buildZM(db.col_resale_price, db.zm_resale_price);
+    }
+
+    // Rebuild bitmap index if enabled
+    if (db.use_bitmap_index_town) {
+        db.rebuildTownBitmaps();
+    }
 }
