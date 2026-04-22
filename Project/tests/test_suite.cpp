@@ -2132,6 +2132,165 @@ static void testZoneMapOptimisation(TestRunner& t) {
     });
 }
 
+static void testA5RLETownOptimisation(TestRunner& t) {
+      t.section("A5: RLE Town Optimisation");
+
+      const std::string csv =
+            HEADER_10 +
+            "Jan-17,BEDOK,3 ROOM,1,Street A,01 TO 03,80,Improved,1990,320000\n"
+            "Feb-17,BEDOK,3 ROOM,2,Street B,01 TO 03,82,Improved,1990,330000\n"
+            "Mar-17,TAMPINES,4 ROOM,3,Street C,04 TO 06,90,Model X,1991,380000\n"
+            "Apr-17,TAMPINES,4 ROOM,4,Street D,04 TO 06,92,Model X,1991,390000\n"
+            "May-17,TAMPINES,4 ROOM,5,Street E,04 TO 06,94,Model X,1991,400000\n"
+            "Jun-17,YISHUN,5 ROOM,6,Street F,07 TO 09,100,Model Y,1992,470000\n";
+
+      t.run("RLE construction correctness on known mini dataset", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_a5_construct.csv");
+
+            ColumnStore db;
+            db.use_dict_encoding = true;
+            db.use_presorted_storage = true;
+            db.use_rle_town = true;
+            loadCSV(fname, db);
+
+            ASSERT_EQ(db.town_run_start.size(), 3u);
+            ASSERT_EQ(db.town_run_length.size(), 3u);
+            ASSERT_EQ(db.town_run_start[0], 0u);
+            ASSERT_EQ(db.town_run_start[1], 2u);
+            ASSERT_EQ(db.town_run_start[2], 5u);
+            ASSERT_EQ(db.town_run_length[0], 2u);
+            ASSERT_EQ(db.town_run_length[1], 3u);
+            ASSERT_EQ(db.town_run_length[2], 1u);
+
+            ASSERT_EQ(db.dict_town.decode(db.town_run_value_encoded[0]), "BEDOK");
+            ASSERT_EQ(db.dict_town.decode(db.town_run_value_encoded[1]), "TAMPINES");
+            ASSERT_EQ(db.dict_town.decode(db.town_run_value_encoded[2]), "YISHUN");
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("Query equivalence: baseline vs A5 over multiple (x,y)", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_a5_parity.csv");
+
+            ColumnStore base;
+            loadCSV(fname, base);
+
+            ColumnStore a5;
+            a5.use_dict_encoding = true;
+            a5.use_presorted_storage = true;
+            a5.use_rle_town = true;
+            loadCSV(fname, a5);
+
+            const std::vector<std::string> towns = {"BEDOK", "TAMPINES", "YISHUN"};
+            for (int x = 1; x <= 6; ++x) {
+                  for (int y = 80; y <= 100; y += 5) {
+                        QueryResult r1, r2;
+                        runQuery(base, x, y, 2017, 1, towns, r1);
+                        runQuery(a5, x, y, 2017, 1, towns, r2);
+
+                        ASSERT_EQ(r1.no_result, r2.no_result);
+                        if (!r1.no_result) {
+                              ASSERT_EQ(r1.year, r2.year);
+                              ASSERT_EQ(r1.month, r2.month);
+                              ASSERT_EQ(r1.town, r2.town);
+                              ASSERT_EQ(r1.block, r2.block);
+                              ASSERT_EQ(r1.floor_area, r2.floor_area);
+                              ASSERT_NEAR(r1.price_per_sqm, r2.price_per_sqm, 1e-9);
+                        }
+                  }
+            }
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("A2+A5 interaction: runs are maximal and contiguous", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_a2a5_maximal.csv");
+
+            ColumnStore db;
+            db.use_presorted_storage = true;
+            db.use_rle_town = true;
+            loadCSV(fname, db);
+
+            ASSERT(db.town_run_start.size() > 0);
+            for (std::size_t k = 1; k < db.town_run_start.size(); ++k) {
+                  ASSERT_EQ(db.town_run_start[k], db.town_run_start[k - 1] + db.town_run_length[k - 1]);
+                  ASSERT(db.town_run_value[k] != db.town_run_value[k - 1]);
+            }
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("A1+A5 interaction: encoded town IDs map correctly to runs", [&]() {
+            const auto fname = writeTmpCSV(csv, "test_a1a5_mapping.csv");
+
+            ColumnStore db;
+            db.use_dict_encoding = true;
+            db.use_presorted_storage = true;
+            db.use_rle_town = true;
+            loadCSV(fname, db);
+
+            for (const auto& kv : db.town_to_runs_encoded) {
+                  const uint16_t tid = kv.first;
+                  for (const uint32_t run_id : kv.second) {
+                        ASSERT(run_id < db.town_run_value_encoded.size());
+                        ASSERT_EQ(db.town_run_value_encoded[run_id], tid);
+                  }
+            }
+
+            std::remove(fname.c_str());
+      });
+
+      t.run("A5 edge cases: single-town, alternating-town, empty and no-match", [&]() {
+            {
+                  const std::string one_town =
+                        HEADER_10 +
+                        "Jan-17,BEDOK,3 ROOM,1,A,01 TO 03,80,Improved,1990,320000\n"
+                        "Feb-17,BEDOK,3 ROOM,2,B,01 TO 03,81,Improved,1990,321000\n"
+                        "Mar-17,BEDOK,3 ROOM,3,C,01 TO 03,82,Improved,1990,322000\n";
+                  const auto fname = writeTmpCSV(one_town, "test_a5_single_town.csv");
+                  ColumnStore db;
+                  db.use_rle_town = true;
+                  loadCSV(fname, db);
+                  ASSERT_EQ(db.town_run_start.size(), 1u);
+                  ASSERT_EQ(db.town_run_length[0], 3u);
+                  std::remove(fname.c_str());
+            }
+
+            {
+                  const std::string alternating =
+                        HEADER_10 +
+                        "Jan-17,BEDOK,3 ROOM,1,A,01 TO 03,80,Improved,1990,320000\n"
+                        "Feb-17,TAMPINES,3 ROOM,2,B,01 TO 03,80,Improved,1990,321000\n"
+                        "Mar-17,BEDOK,3 ROOM,3,C,01 TO 03,80,Improved,1990,322000\n"
+                        "Apr-17,TAMPINES,3 ROOM,4,D,01 TO 03,80,Improved,1990,323000\n";
+                  const auto fname = writeTmpCSV(alternating, "test_a5_alternating.csv");
+                  ColumnStore db;
+                  db.use_rle_town = true;
+                  loadCSV(fname, db);
+                  ASSERT_EQ(db.town_run_start.size(), 4u);
+                  for (std::size_t i = 0; i < db.town_run_length.size(); ++i) {
+                        ASSERT_EQ(db.town_run_length[i], 1u);
+                  }
+                  QueryResult r;
+                  runQuery(db, 2, 80, 2017, 1, {"NON_EXISTENT"}, r);
+                  ASSERT(r.no_result);
+                  std::remove(fname.c_str());
+            }
+
+            {
+                  const auto fname = writeTmpCSV(HEADER_10, "test_a5_empty.csv");
+                  ColumnStore db;
+                  db.use_rle_town = true;
+                  loadCSV(fname, db);
+                  ASSERT_EQ(db.town_run_start.size(), 0u);
+                  QueryResult r;
+                  runQuery(db, 1, 80, 2017, 1, {"BEDOK"}, r);
+                  ASSERT(r.no_result);
+                  std::remove(fname.c_str());
+            }
+      });
+}
+
 // =============================================================================
 // Section 17: B2 Bitmap Town Index
 // =============================================================================
@@ -2306,6 +2465,7 @@ int main()
   testReuseOptimisation(t);
   testA4C6C4Optimisations(t);
   testA2B3Optimisations(t);
+      testA5RLETownOptimisation(t);
   testZoneMapOptimisation(t);
       testBitmapTownOptimisation(t);
 

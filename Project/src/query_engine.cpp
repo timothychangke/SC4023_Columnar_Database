@@ -24,6 +24,7 @@
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -219,6 +220,10 @@ void runQuery(const ColumnStore&              db,
             local_town_mask = buildTownBitmapMaskImpl(db, towns);
             town_mask_ptr = &local_town_mask;
         }
+    if (db.use_rle_town) {
+        db.town_runs_scanned = 0;
+        db.rows_skipped_by_rle = 0;
+        db.rows_scanned_after_rle = 0;
     }
 
     // =================================================================
@@ -260,6 +265,123 @@ void runQuery(const ColumnStore&              db,
             result.block               = db.col_block[e.idx];
             result.flat_model          = db.col_flat_model[e.idx];
             result.lease_commence_date = db.col_lease_commence_date[e.idx];
+        }
+        return;
+    }
+
+    // =================================================================
+    // A5 FAST PATH (RLE Town)
+    // Iterate only matching town runs; avoid row-level town comparisons.
+    // If A2+B3 are available, month range narrowing is done by binary search
+    // within each selected run.
+    // =================================================================
+    if (db.use_rle_town && !db.town_run_start.empty()) {
+        std::vector<uint32_t> selected_runs;
+        selected_runs.reserve(towns.size());
+
+        if (db.use_dict_encoding) {
+            for (const auto& town : towns) {
+                uint16_t tid = 0;
+                if (!db.dict_town.lookup(town, tid)) continue;
+                auto it = db.town_to_runs_encoded.find(tid);
+                if (it == db.town_to_runs_encoded.end()) continue;
+                selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
+            }
+        } else {
+            for (const auto& town : towns) {
+                auto it = db.town_to_runs.find(town);
+                if (it == db.town_to_runs.end()) continue;
+                selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
+            }
+        }
+
+        if (selected_runs.empty()) {
+            db.rows_skipped_by_rle = static_cast<uint64_t>(N);
+            return;
+        }
+
+        std::sort(selected_runs.begin(), selected_runs.end());
+        selected_runs.erase(std::unique(selected_runs.begin(), selected_runs.end()), selected_runs.end());
+
+        uint64_t rows_in_selected_runs = 0;
+        for (const uint32_t run_id : selected_runs) {
+            rows_in_selected_runs += static_cast<uint64_t>(db.town_run_length[run_id]);
+        }
+        db.rows_skipped_by_rle = (rows_in_selected_runs >= N)
+            ? 0
+            : static_cast<uint64_t>(N) - rows_in_selected_runs;
+
+        const uint32_t start_key = monthKey(target_year, start_month);
+        const uint32_t end_key   = monthKey(target_year, end_month);
+
+        for (const uint32_t run_id : selected_runs) {
+            ++db.town_runs_scanned;
+
+            const std::size_t run_start = db.town_run_start[run_id];
+            const std::size_t run_end   = run_start + db.town_run_length[run_id];
+
+            std::size_t scan_l = run_start;
+            std::size_t scan_r = run_end;
+
+            if (db.use_presorted_storage && db.use_month_binary_search) {
+                scan_l = lowerBoundMonthKey(db, run_start, run_end, start_key);
+                scan_r = upperBoundMonthKey(db, scan_l, run_end, end_key);
+            }
+
+            for (std::size_t i = scan_l; i < scan_r; ++i) {
+                ++db.rows_scanned_after_rle;
+
+                if (!(db.use_presorted_storage && db.use_month_binary_search)) {
+                    if (db.col_month_year[i] != target_year) continue;
+                    const uint8_t m = db.col_month_month[i];
+                    if (m < start_month || m > end_month) continue;
+                }
+
+                if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+
+                if (db.use_int_multiply) {
+                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
+                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i])) {
+                        continue;
+                    }
+                }
+
+                const double ppsm = db.use_precomputed_ppsm
+                    ? db.col_price_per_sqm[i]
+                    : static_cast<double>(db.col_resale_price[i]) /
+                      static_cast<double>(db.col_floor_area[i]);
+
+                if (ppsm < min_ppsm) {
+                    min_ppsm = ppsm;
+                    best_i   = i;
+                    result.local_idx = i;
+                    result.no_result = false;
+                }
+            }
+        }
+
+        if (result.no_result) return;
+
+        if (min_ppsm > 4725.0) {
+            result.no_result = true;
+            return;
+        }
+
+        result.year          = db.col_month_year[best_i];
+        result.month         = db.col_month_month[best_i];
+        result.floor_area    = db.col_floor_area[best_i];
+        result.price_per_sqm = min_ppsm;
+
+        if (db.use_columnar_files) {
+            result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
+            result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
+            result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
+            result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
+        } else {
+            result.town                = db.col_town[best_i];
+            result.block               = db.col_block[best_i];
+            result.flat_model          = db.col_flat_model[best_i];
+            result.lease_commence_date = db.col_lease_commence_date[best_i];
         }
         return;
     }
@@ -758,6 +880,7 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
         part.use_late_materialise  = base_db.use_late_materialise;
         part.use_zone_maps         = base_db.use_zone_maps;
         part.use_bitmap_index_town = base_db.use_bitmap_index_town;
+        part.use_rle_town          = base_db.use_rle_town;
         part.use_columnar_files    = true;
         part.column_dir            = base_db.column_dir;
 

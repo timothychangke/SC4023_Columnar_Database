@@ -86,6 +86,9 @@ namespace perf {
     uint64_t queries_valid    = 0;  // (x,y) pairs with a valid result
     uint64_t chunks_total     = 0;  // total chunks evaluated 
     uint64_t chunks_skipped   = 0;  // chunks skipped by zone map pruning 
+    uint64_t runs_scanned     = 0;  // A5: total town runs traversed
+    uint64_t rows_skipped_by_rle = 0;      // A5: rows avoided by run pruning
+    uint64_t rows_scanned_after_rle = 0;   // A5: rows actually scanned after pruning
 
     void reset() {
         rows_scanned = 0;
@@ -96,6 +99,9 @@ namespace perf {
         queries_valid = 0;
         chunks_total = 0;
         chunks_skipped = 0;
+        runs_scanned = 0;
+        rows_skipped_by_rle = 0;
+        rows_scanned_after_rle = 0;
     }
 }
 // =============================================================================
@@ -110,6 +116,7 @@ struct OptConfig {
     bool predicate_reorder;     // C4
     bool zone_maps;             // B1
     bool presorted_storage;     // A2
+    bool rle_town;              // A5
     bool month_binary_search;   // B3
     bool late_materialise;      // C3
     bool columnar_files;        // A9
@@ -128,6 +135,7 @@ struct OptConfig {
         db.use_predicate_reorder = predicate_reorder;
         db.use_zone_maps         = zone_maps;
         db.use_presorted_storage = presorted_storage;
+        db.use_rle_town          = rle_town;
         db.use_month_binary_search = month_binary_search;
         db.use_late_materialise = late_materialise;
         db.use_columnar_files = columnar_files;
@@ -252,6 +260,19 @@ static std::size_t estimateMemoryBytes(const ColumnStore& db) {
     }
     bytes += db.town_bitmap_lookup.bucket_count() *
              (sizeof(void*) + sizeof(std::pair<std::string, uint16_t>));
+    // A5 RLE overhead
+    bytes += db.town_run_value_encoded.capacity() * sizeof(uint16_t);
+    bytes += db.town_run_start.capacity() * sizeof(uint32_t);
+    bytes += db.town_run_length.capacity() * sizeof(uint32_t);
+    for (const auto& s : db.town_run_value) {
+        bytes += sizeof(std::string) + s.capacity();
+    }
+    for (const auto& kv : db.town_to_runs_encoded) {
+        bytes += sizeof(uint16_t) + kv.second.capacity() * sizeof(uint32_t);
+    }
+    for (const auto& kv : db.town_to_runs) {
+        bytes += sizeof(std::string) + kv.first.capacity() + kv.second.capacity() * sizeof(uint32_t);
+    }
 
     return bytes;
 }
@@ -400,6 +421,72 @@ static void runQueryInstrumented(
         return;
     }
 
+    // A5 counting model: only rows inside selected town runs are scanned.
+    if (db.use_rle_town && !db.town_run_start.empty()) {
+        std::vector<uint32_t> selected_runs;
+        if (db.use_dict_encoding) {
+            for (const auto& t : towns) {
+                uint16_t id = 0;
+                if (!db.dict_town.lookup(t, id)) continue;
+                auto it = db.town_to_runs_encoded.find(id);
+                if (it == db.town_to_runs_encoded.end()) continue;
+                selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
+            }
+        } else {
+            for (const auto& t : towns) {
+                auto it = db.town_to_runs.find(t);
+                if (it == db.town_to_runs.end()) continue;
+                selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
+            }
+        }
+
+        if (!selected_runs.empty()) {
+            std::sort(selected_runs.begin(), selected_runs.end());
+            selected_runs.erase(std::unique(selected_runs.begin(), selected_runs.end()), selected_runs.end());
+
+            uint64_t rows_in_runs = 0;
+            const uint32_t start_key = monthKey(target_year, start_month);
+            const uint32_t end_key   = monthKey(target_year, end_month);
+
+            for (const uint32_t run_id : selected_runs) {
+                ++perf::runs_scanned;
+                const std::size_t run_start = db.town_run_start[run_id];
+                const std::size_t run_end = run_start + db.town_run_length[run_id];
+                rows_in_runs += db.town_run_length[run_id];
+
+                std::size_t scan_l = run_start;
+                std::size_t scan_r = run_end;
+                if (db.use_presorted_storage && db.use_month_binary_search) {
+                    scan_l = lowerBoundMonthKey(db, run_start, run_end, start_key);
+                    scan_r = upperBoundMonthKey(db, scan_l, run_end, end_key);
+                }
+
+                for (std::size_t i = scan_l; i < scan_r; ++i) {
+                    ++local_rows;
+                    ++perf::rows_scanned_after_rle;
+
+                    if (!(db.use_presorted_storage && db.use_month_binary_search)) {
+                        if (db.col_month_year[i] != target_year) continue;
+                        if (db.col_month_month[i] < start_month || db.col_month_month[i] > end_month) continue;
+                    }
+
+                    if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+                    ++local_passed;
+                }
+            }
+
+            if (rows_in_runs < N) {
+                perf::rows_skipped_by_rle += static_cast<uint64_t>(N) - rows_in_runs;
+            }
+
+            perf::rows_scanned += local_rows;
+            perf::town_comparisons += 0;
+            perf::rows_passed += local_passed;
+            if (!result.no_result) ++perf::queries_valid;
+            return;
+        }
+    }
+
     for (std::size_t i = 0; i < N; ++i) {
         ++local_rows;
 
@@ -477,6 +564,9 @@ struct BenchmarkResult {
     uint64_t    queries_valid = 0;
     uint64_t    chunks_total = 0;        // B1: total chunks evaluated
     uint64_t    chunks_skipped = 0;      // B1: chunks skipped by zone map pruning
+    uint64_t    runs_scanned = 0;         // A5
+    uint64_t    rows_skipped_by_rle = 0;  // A5
+    uint64_t    rows_scanned_after_rle = 0; // A5
     std::size_t memory_bytes;
     std::size_t dict_town_size;
     std::size_t dict_flat_type_size;
@@ -684,6 +774,9 @@ static BenchmarkResult runBenchmark(
             bm.queries_valid    = perf::queries_valid;
             bm.chunks_total     = perf::chunks_total;
             bm.chunks_skipped   = perf::chunks_skipped;
+            bm.runs_scanned     = perf::runs_scanned;
+            bm.rows_skipped_by_rle = perf::rows_skipped_by_rle;
+            bm.rows_scanned_after_rle = perf::rows_scanned_after_rle;
         }
     }
 
@@ -836,6 +929,7 @@ int main(int argc, char* argv[]) {
     // compared against the first entry (baseline).
     // =====================================================================
     std::vector<OptConfig> configs = {
+<<<<<<< HEAD
         //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     B3     C3     A9
         { "Baseline",                                                                            false, false, false, false, false, false, false, false, false, false },
         { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false, false, false, false, false },
@@ -865,11 +959,10 @@ int main(int argc, char* argv[]) {
         { "A1+A4+C3+C4+C6: All Scan Opts",                                                       true,  false, true,  true,  true,  false, false, false, true,  false },
         { "A1+A4+C3+C4+C6+B1: All Scan+ZoneMaps",                                                true,  false, true,  true,  true,  true,  false, false, true,  false },
 
-        { "A9: Columnar Files",                                                                  false, false, false, false, false, false, false, false, false, true  },
-        { "A9+A1: Columnar+Dict",                                                                true,  false, false, false, false, false, false, false, false, true  },
-        { "A9+A1+A4+C6+C4+B1: ColAll",                                                           true,  false, true,  true,  true,  true,  false, false, false, true  },
-        { "A9+C1C2: Columnar+Reuse",                                                             false, true,  false, false, false, false, false, false, false, true  },
-        { "A9+All: Everything",                                                                  true,  true,  true,  true,  true,  true,  true,  true,  true,  true  },
+        { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false, false },
+        { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, false, true,  false, false },
+        { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  false, true,  false, false },
+        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  false, true,  false, false },
 
         { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true,  50, false },
         { "D1: Chunked I/O 10MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true,  10, false },
@@ -887,14 +980,20 @@ int main(int argc, char* argv[]) {
         { "E1+B1: Partitioned+ZoneMaps",                                                         true,  false, true,  true,  true,  true,  true,  false, false, true,  false, 50, false, false, true },
         { "E1+C1C2: Partitioned+Reuse",                                                          true,  true,  false, false, false, false, true,  false, false, true,  false, 50, false, false, true },
         { "E1+All: Partitioned+Everything",                                                      true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50, false, false, true },
+        { "A5: RLE Town",                                                                        false, false, false, false, false, false, false, true,  false, false, false },
+        { "A2+A5: Presort + RLE Town",                                                           false, false, false, false, false, false, true,  true,  false, false, false },
+        { "A1+A2+A5: Dict + Presort + RLE Town",                                                 true,  false, false, false, false, false, true,  true,  false, false, false },
+        { "B3+A2+A5: MonthBSearch + Presort + RLE",                                              false, false, false, false, false, false, true,  true,  true,  false, false },
+        { "C3+A2+A5: LateMat + Presort + RLE",                                                   false, false, false, false, false, false, true,  true,  false, true,  false },
+        { "A1+A4+C6+C4+B1+A2+A5+B3+C3: Full Stack + A5",                                        true,  false, true,  true,  true,  true,  true,  true,  true,  true,  false },
 
-        { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false },
-        { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, true,  false, false },
-        { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  true,  false, false },
-        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  true,  false, false },
-        { "A2+B3+A4+C6: Pre-sorted + Month Binary Search + Precompute PPSM + Int Multiply",    false, false, true,  true,  false, false, true,  true,  false, false },
-        { "A9+A2+B3+A4+C6: ColFile+Presort+MonthBSearch+PPSM+IntMul",                            false, false, true,  true,  false, false, true,  true,  false, true  },
-        { "A9+A2+B3: ColFile+Presort+MonthBSearch",                                              false, false, false, false, false, false, true,  true,  false, true  },
+        { "A9: Columnar Files",                                                                  false, false, false, false, false, false, false, false, false, false, true  },
+        { "A9+A1: Columnar+Dict",                                                                true,  false, false, false, false, false, false, false, false, false, true  },
+        { "A9+A2+B3: ColFile+Presort+MonthBSearch",                                              false, false, false, false, false, false, true,  false, true,  false, true  },
+        { "A9+A2+A5+B3: ColFile+Presort+RLE+MonthBSearch",                                       false, false, false, false, false, false, true,  true,  true,  false, true  },
+
+        { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, false, true,  /*chunked_io=*/true, /*budget_mb=*/50 },
+        { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, false, true,  true,  true, 50 },
     };
 
     // =====================================================================
@@ -1062,6 +1161,26 @@ int main(int argc, char* argv[]) {
             std::cout << "    I/O chunks loaded: " << bm.io_chunks_loaded << "\n";
             std::cout << "    I/O bytes read:    " << formatBytes(bm.io_bytes_read) << "\n";
             std::cout << "    Peak chunk rows:   " << bm.io_chunk_rows << "\n";
+        }
+    }
+
+    bool any_a5 = false;
+    for (const auto& bm : all_results) {
+        if (bm.runs_scanned > 0 || bm.rows_skipped_by_rle > 0 || bm.rows_scanned_after_rle > 0) {
+            any_a5 = true;
+            break;
+        }
+    }
+    if (any_a5) {
+        std::cout << "\n========================================\n";
+        std::cout << "  A5 RLE TOWN STATS\n";
+        std::cout << "========================================\n";
+        for (const auto& bm : all_results) {
+            if (bm.runs_scanned == 0 && bm.rows_skipped_by_rle == 0 && bm.rows_scanned_after_rle == 0) continue;
+            std::cout << "  " << bm.config_name << ":\n";
+            std::cout << "    Town runs scanned:    " << formatCount(bm.runs_scanned) << "\n";
+            std::cout << "    Rows skipped by RLE:  " << formatCount(bm.rows_skipped_by_rle) << "\n";
+            std::cout << "    Rows scanned postRLE: " << formatCount(bm.rows_scanned_after_rle) << "\n";
         }
     }
 

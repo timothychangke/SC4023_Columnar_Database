@@ -316,6 +316,14 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
         }
     }
 
+    if (db.use_rle_town) {
+        if (!db.use_presorted_storage) {
+            std::cout << "[A5] Warning: --rle-town enabled without A2 pre-sort. "
+                         "Correctness is unchanged, but speedup may be limited.\n";
+        }
+        db.buildTownRLE();
+    }
+
     // ── Materialisation columns are NOT loaded here ──
     // block, flat_model, lease_commence_date, street_name, flat_type,
     // storey_range will be loaded lazily for just the winning row index

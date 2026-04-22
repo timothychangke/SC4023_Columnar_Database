@@ -8,6 +8,55 @@
 
 #include <algorithm>
 
+#include <iostream>
+
+void ColumnStore::buildTownRLE() {
+    town_run_value.clear();
+    town_run_value_encoded.clear();
+    town_run_start.clear();
+    town_run_length.clear();
+    town_to_runs.clear();
+    town_to_runs_encoded.clear();
+
+    const std::size_t N = size();
+    if (N == 0) return;
+
+    if (use_dict_encoding) {
+        std::size_t i = 0;
+        while (i < N) {
+            const uint16_t tid = col_town_encoded[i];
+            const std::size_t begin = i;
+            while (i < N && col_town_encoded[i] == tid) ++i;
+
+            const uint32_t run_idx = static_cast<uint32_t>(town_run_start.size());
+            town_run_value_encoded.push_back(tid);
+            town_run_start.push_back(static_cast<uint32_t>(begin));
+            town_run_length.push_back(static_cast<uint32_t>(i - begin));
+            town_to_runs_encoded[tid].push_back(run_idx);
+        }
+    } else {
+        std::size_t i = 0;
+        while (i < N) {
+            const std::string town = col_town[i];
+            const std::size_t begin = i;
+            while (i < N && col_town[i] == town) ++i;
+
+            const uint32_t run_idx = static_cast<uint32_t>(town_run_start.size());
+            town_run_value.push_back(town);
+            town_run_start.push_back(static_cast<uint32_t>(begin));
+            town_run_length.push_back(static_cast<uint32_t>(i - begin));
+            town_to_runs[town].push_back(run_idx);
+        }
+    }
+
+    town_runs_scanned = 0;
+    rows_skipped_by_rle = 0;
+    rows_scanned_after_rle = 0;
+
+    std::cout << "A5 RLE town runs built: " << town_run_start.size()
+              << " runs over " << N << " rows\n";
+}
+
 // return how many records we have. 
 // all vectors are parallel so just checking one col size is enough.
 std::size_t ColumnStore::size() const {
@@ -92,6 +141,17 @@ void ColumnStore::clear() {
 
     town_partitions.clear();
     town_partitions_encoded.clear();
+
+    town_run_value.clear();
+    town_run_value_encoded.clear();
+    town_run_start.clear();
+    town_run_length.clear();
+    town_to_runs.clear();
+    town_to_runs_encoded.clear();
+
+    town_runs_scanned = 0;
+    rows_skipped_by_rle = 0;
+    rows_scanned_after_rle = 0;
     
     // zone maps
     zm_floor_area.chunks.clear();
