@@ -386,8 +386,14 @@ If a row is in memory, it implicitly means that it must belong to a target town.
 No other town comparisions are then needed.
 Memory footprint also drops to \textbf{660\,KB}, which is 99.1\% less than baseline.
 
-% TODO (Mr Neo)
-\textit{Planned extension:} Run-length encoding (RLE) on the sorted Town column within each partition, exploiting contiguous runs created by A2 to compress \texttt{town\_encoded.col} to a single (value, count) pair per partition.
+\subsection{RLE on Sorted Towns}
+We implement Run length encoding on sorted town columns within each partition by compressing \texttt{town\_encoded.col} to a single (value, count) pair per partition.
+\[
+	exttt{run\_value}[k],\; \texttt{run\_start}[k],\; \texttt{run\_length}[k].
+\]
+
+The query engine resolves requested towns to run IDs and scans only selected intervals
+instead of checking town equality for every row.
 
 \subsection{Exception Handling}\label{sec:except}
 In empty result sets, we return a ``No result'' row in our output.

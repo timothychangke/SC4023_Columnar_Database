@@ -156,6 +156,44 @@ The program will:
 3. Run all 568 `(x, y)` queries (`x` ∈ [1,8], `y` ∈ [80,150]).
 4. Write valid results to `ScanResult_A5656567B.csv`.
 
+### Optimisation flags (including A5)
+
+Common runtime flags:
+
+- `--dict-encoding` (A1)
+- `--presort-storage` (A2)
+- `--rle-town` or `--rle` (A5)
+- `--month-bsearch` (B3)
+- `--zone-maps` (B1)
+- `--precompute-ppsm` (A4)
+- `--int-multiply` (C6)
+- `--predicate-reorder` (C4)
+- `--late-materialise` (C3)
+- `--reuse` (C1/C2)
+- `--columnar-files` (A9)
+
+Example:
+
+```bash
+./column_store A5656567B --dict-encoding --presort-storage --rle-town --month-bsearch
+```
+
+### A5: Run-Length Encoding (Town)
+
+When `--rle-town` is enabled, the engine builds run metadata over the final in-memory row order:
+
+- `town_run_value[k]` / `town_run_value_encoded[k]`
+- `town_run_start[k]`
+- `town_run_length[k]`
+
+At query time, the engine jumps directly to runs for requested towns and skips non-target runs. This is most effective with A2 because town values become long contiguous regions.
+
+Complexity summary:
+
+- Build: $O(N)$
+- Space: $O(R)$ where $R$ is number of runs
+- Town-filter stage: from row-level $O(N)$ checks to run-level pruning plus interval scan
+
 Console output during a run looks like:
 
 ```
