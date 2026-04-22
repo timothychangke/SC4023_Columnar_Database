@@ -126,6 +126,7 @@ g++ -std=c++17 -Wall -Wextra -Iinclude \
         src/csv_parser.cpp \
         src/query_engine.cpp \
         src/output_writer.cpp \
+        src/column_file_io.cpp \
         -o test_runner
 ```
 
