@@ -82,3 +82,4 @@ report/*.fdb_latexmk
 report/*.fls
 report/*.synctex.gz
 data/columns_*/
+data/
