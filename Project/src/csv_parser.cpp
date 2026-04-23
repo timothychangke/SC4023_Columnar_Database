@@ -410,8 +410,7 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
     // Build on FINAL in-memory order (after A2 reorder, if any).
     if (db.use_rle_town) {
         if (!db.use_presorted_storage) {
-            std::cout << "[A5] Warning: --rle-town enabled without A2 pre-sort. "
-                         "Correctness is unchanged, but speedup may be limited.\n";
+            std::cout << "[A5] Warning: --rle-town enabled without A2 pre-sort. ";
         }
         db.buildTownRLE();
     }

@@ -1,8 +1,8 @@
 \documentclass[11pt,a4paper]{article}
 
 % ---------- Page geometry ----------
-\usepackage[a4paper,top=0.75in,bottom=0.8in,left=0.75in,right=0.75in,
-            headsep=8pt,footskip=22pt]{geometry}
+\usepackage[a4paper,top=0.5in,bottom=0.5in,left=0.55in,right=0.55in,
+            headsep=6pt,footskip=14pt]{geometry}
 
 % ---------- Fonts ----------
 \usepackage{newtxtext}
@@ -84,6 +84,45 @@
 \definecolor{layerbg}{HTML}{FAFAFA}
 \definecolor{layerborder}{HTML}{B0BEC5}
 
+% ── Category colours (prefixed to avoid clashes) ──
+\definecolor{spBase}{HTML}{78909C}
+\definecolor{spEnc}{HTML}{FFF3E0}
+\definecolor{spReuse}{HTML}{C8E6C9}
+\definecolor{spIdx}{HTML}{E0F7FA}
+\definecolor{spScan}{HTML}{F3E5F5}
+\definecolor{spPresort}{HTML}{EDE7F6}
+\definecolor{spCol}{HTML}{E3F2FD}
+\definecolor{spIO}{HTML}{FCE4EC}
+\definecolor{spPart}{HTML}{D1C4E9}
+\definecolor{spNeg}{HTML}{FFCDD2}
+\definecolor{spCombo}{HTML}{FFF9C4}
+
+\definecolor{seBase}{HTML}{546E7A}
+\definecolor{seEnc}{HTML}{E65100}
+\definecolor{seReuse}{HTML}{2E7D32}
+\definecolor{seIdx}{HTML}{00838F}
+\definecolor{seScan}{HTML}{6A1B9A}
+\definecolor{sePresort}{HTML}{4527A0}
+\definecolor{seCol}{HTML}{1565C0}
+\definecolor{seIO}{HTML}{C62828}
+\definecolor{sePart}{HTML}{4527A0}
+\definecolor{seNeg}{HTML}{B71C1C}
+\definecolor{seCombo}{HTML}{F57F17}
+\definecolor{spRLE}{HTML}{B2DFDB}    % teal fill
+\definecolor{seRLE}{HTML}{00796B}    % teal stroke
+
+\usepackage[noend]{algpseudocode}
+ 
+\definecolor{complexbg}{HTML}{FFF9C4}
+\definecolor{complexborder}{HTML}{F57F17}
+\definecolor{step1txt}{HTML}{2E7D32}
+\definecolor{step2txt}{HTML}{1565C0}
+\definecolor{step3txt}{HTML}{4527A0}
+\definecolor{cmtcol}{HTML}{4CAF50}
+
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepgfplotslibrary{groupplots}
 \usepackage{hyperref}
 \usepackage{cite}
 \usepackage[inline]{enumitem}
@@ -125,6 +164,7 @@
   morekeywords={uint8_t,uint16_t,uint32_t,uint64_t,size_t,std,vector,string,unordered_set}
 }
 
+\algrenewcommand\algorithmiccomment[1]{\hfill{\color{cmtcol}\(\triangleright\) \textit{#1}}}
 % ===================== COVER PAGE =====================
 \begin{titlepage}
     \centering
@@ -150,14 +190,6 @@
       \end{tabular}
 
     \vspace{1cm}
-    \begin{tabular}{@{}ll@{\qquad}ll@{}}
-    \toprule
-    Matric (query source) & \texttt{A5656567B} & Target year & 2016 \\
-    Start month & 6 (June) & Threshold & $\le 4725$ \\
-    Town list & \multicolumn{3}{l}{JURONG WEST, CLEMENTI, HOUGANG, PASIR RIS, TAMPINES, YISHUN, BEDOK} \\
-    Ranges & \multicolumn{3}{l}{$x \in [1,8]$,\; $y \in [80,150]$ \quad$\Rightarrow$\quad 568 $(x,y)$ query pairs} \\
-    \bottomrule
-    \end{tabular}
 
     \vfill 
     {\huge \textbf{SC4023 Big Data Management}}\\
@@ -402,7 +434,6 @@ Ties in minimum price-per-sqm are resolved by first encountered order.
 
 \subsection{Space--Time Trade-off Summary}\label{sec:tradeoff-summary}
 
-% TODO (Mr Neo)
 \begin{table}[H]\centering\footnotesize
 \setlength{\tabcolsep}{3pt}
 \begin{tabular}{@{}lrrl@{}}
@@ -462,34 +493,10 @@ The 568 queries overlap: for fixed $y$, the month window for $x{=}k$ is a supers
 \paragraph{Three-step cumulative table build.}
 \textbf{Step~1 (single $O(N)$ scan):} For each row passing year and town filters, compute $\textit{offset} = \texttt{month} - \textit{start} + 1$ (range 1--8) and $\textit{bucket} = \min(\texttt{area},\, 150)$.
 Records with $\texttt{area} > 150$ are \emph{clamped} to bucket 150, not dropped---this is correct because every valid $y$ threshold is $\le 150$, so a record with area 160 satisfies every $y$ and must contribute to all buckets it qualifies for; the clamped bucket propagates into all lower buckets during the Y-sweep.
-
-\begin{lstlisting}[caption={\texttt{buildCumulativeTable} — Step 1 scan (core loop).}]
-vector<vector<MinEntry>> per_x(9, vector<MinEntry>(151));
-for (size_t i = 0; i < N; ++i) {
-    if (db.col_month_year[i] != target_year) continue;
-    uint8_t month = db.col_month_month[i];
-    if (month < start_month) continue;
-    int offset = (int)month - (int)start_month + 1;
-    if (offset < 1 || offset > 8) continue;
-    // town filter (A1-aware: int vs string)
-    if (db.use_dict_encoding) {
-        bool match = false;
-        for (auto& tid : town_ids)
-            if (db.col_town_encoded[i] == tid) { match = true; break; }
-        if (!match) continue;
-    } else { if (town_set.find(db.col_town[i]) == town_set.end()) continue; }
-    unsigned area = db.col_floor_area[i];
-    if (area < 80) continue;
-    unsigned bucket = (area > 150) ? 150u : area;  // clamp, NOT drop
-    double ppsm = (double)db.col_resale_price[i] / db.col_floor_area[i];
-    if (!per_x[offset][bucket].has || ppsm < per_x[offset][bucket].ppsm)
-        per_x[offset][bucket] = {true, ppsm, i};
-}
-\end{lstlisting}
-
 \textbf{Step~2 (X-sweep):} For each area bucket, sweep offsets $1 \to 8$, propagating a running minimum.
 \textbf{Step~3 (Y-sweep):} For each offset, sweep area $149 \to 80$, propagating the minimum downward.
 After Step~3, \texttt{cum\_table[x][y]} holds the answer for each $(x,y)$ pair, and the query phase becomes a single array lookup.
+The full C++ implementation is given in Figure~\ref{fig:cumtable} (Appendix).
 
 \paragraph{Results.}
 C1+C2 alone reduces query time from 2,299.5\,ms to 4.6\,ms (499$\times$ query speedup), with rows scanned dropping from 147.25M to 259.2K (the single build scan).
@@ -561,23 +568,41 @@ All ${\sim}46$ configurations produced byte-identical output, verified by the ev
 
 % ===================== SECTION 3: EXPERIMENT RESULT =====================
 \section{Experiment Result}\label{sec:experiment}
+Our query parameters are derived from matric number \texttt{U2220136J}: target year 2016, start month 3 (March), threshold $\le 4725$, towns \{CLEMENTI, BEDOK, BUKIT PANJANG, CHOA CHU KANG, PASIR RIS\}, with $x \in [1,8]$ and $y \in [80,150]$ yielding 568 $(x,y)$ query pairs.
 
 \subsection{Compulsory Artefacts}\label{sec:artefacts}
 \begin{figure}[H]\centering
-  \begin{subfigure}[t]{0.48\linewidth}\centering
-    % \includegraphics[width=\linewidth]{figs/run_terminal.png}
-    \caption{End-to-end build + run.}\label{fig:terminal}
-  \end{subfigure}\hfill
-  \begin{subfigure}[t]{0.48\linewidth}\centering
-    % \includegraphics[width=\linewidth]{figs/scanresult_csv.png}
-    \caption{\texttt{ScanResult\_A5656567B.csv}.}\label{fig:csv}
-  \end{subfigure}
-  \caption{Execution screenshots (spec-mandated).}
+  \begin{minipage}[t]{0.48\linewidth}
+    \begin{subfigure}[t]{\linewidth}\centering
+      \includegraphics[width=\linewidth]{build_terminal.png}
+      \caption{Compilation.}\label{fig:build}
+    \end{subfigure}\\[4pt]
+    \begin{subfigure}[t]{\linewidth}\centering
+      \includegraphics[width=\linewidth]{run_terminal.png}
+      \caption{Execution (259{,}237 rows, 568 queries).}\label{fig:terminal}
+    \end{subfigure}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.48\linewidth}
+    \begin{subfigure}[t]{\linewidth}\centering
+      \includegraphics[width=\linewidth]{scanresult_csv.png}
+      \caption{\texttt{ScanResult\_U2220136J.csv}.}\label{fig:csv}
+    \end{subfigure}
+  \end{minipage}
+  \caption{End-to-end execution: build (a), ingestion + query (b), output CSV (c).}\label{fig:artefacts}
 \end{figure}
 
 \subsection{Excel Cross-Validation}\label{sec:excel}
-Engine outputs were validated against Excel \texttt{MINIFS}/\texttt{FILTER} for representative $(x,y)$ pairs.
-Table~\ref{tab:excel} confirms byte-exact agreement across different selectivities; additional pairs are in the Appendix.
+We wrote an independent Office Script to verify engine outputs.
+The script reads the raw CSV dataset, applies the same four predicates
+(Year$\,{=}\,$2016, Month$\,{\in}\,$[start, start$+x{-}1$],
+Town$\,{\in}\,$\{CLEMENTI, BEDOK, BUKIT PANJANG, CHOA CHU KANG, PASIR RIS\},
+Floor\_Area$\,{\ge}\,y$), and computes
+$\min(\texttt{Resale\_Price}/\texttt{Floor\_Area})$ rounded to the nearest
+integer---identical logic to the engine's \texttt{runQuery}.
+Table~\ref{tab:excel} confirms exact agreement across six $(x,y)$ pairs
+spanning different selectivities; the Appendix
+(Figure~\ref{fig:excel-extra}) shows the script environment and output
+alongside the engine's CSV.
 
 \begin{table}[H]\centering\footnotesize
 \setlength{\tabcolsep}{3pt}
@@ -585,10 +610,12 @@ Table~\ref{tab:excel} confirms byte-exact agreement across different selectiviti
 \toprule
 $x$ & $y$ & Engine PPSM & Excel PPSM & Match \\
 \midrule
-1 & 80  & \textit{[value]} & \textit{[value]} & \checkmark \\
-4 & 100 & \textit{[value]} & \textit{[value]} & \checkmark \\
-7 & 130 & \textit{[value]} & \textit{[value]} & \checkmark \\
-8 & 150 & \textit{[value]} & \textit{[value]} & \checkmark \\
+1 & 80  & 3028 & 3028 & \checkmark \\
+3 & 90  & 2878 & 2878 & \checkmark \\
+4 & 100 & 2788 & 2788 & \checkmark \\
+6 & 120 & 2878 & 2878 & \checkmark \\
+7 & 130 & 2939 & 2939 & \checkmark \\
+8 & 150 & 3387 & 3387 & \checkmark \\
 \bottomrule
 \end{tabular}
 \caption{Excel cross-validation for selected $(x,y)$ pairs.}\label{tab:excel}
@@ -706,303 +733,611 @@ If revisiting this project, we would explore a cost-based predicate optimiser th
 
 % ===================== APPENDIX =====================
 \section*{Appendix: Figures}
+\vspace{-1.0cm}
 
-% TODO (Tim): fix
 \begin{figure}[H]
   \centering
-  % Make sure you have these libraries loaded in your preamble:
-  % \usetikzlibrary{arrows.meta, positioning, fit, backgrounds, decorations.pathreplacing, calc}
   \begin{tikzpicture}[
-      >=Stealth,
-      % -- styles --
-      bigbox/.style={draw, rounded corners=4pt, minimum height=0.8cm,
-        font=\small\sffamily, align=center, line width=0.7pt},
-      colbox/.style={draw, minimum width=1.2cm, minimum height=0.48cm,
-        font=\scriptsize\ttfamily, align=center, line width=0.5pt},
-      optbox/.style={draw, rounded corners=2pt, minimum height=0.42cm,
-        font=\scriptsize\sffamily, align=center, line width=0.5pt},
-      negopt/.style={optbox, fill=negcol!50, densely dashed},
-      layerbox/.style={draw=layerborder, rounded corners=5pt, line width=0.8pt,
-        fill=layerbg, inner sep=6pt},
-      layerlbl/.style={font=\scriptsize\sffamily\bfseries, text=arrowcol},
-      ann/.style={font=\tiny\sffamily, text=metaann},
-      arr/.style={->, line width=0.8pt, color=arrowcol},
-      darr/.style={->, line width=0.7pt, color=arrowcol, dashed},
-      dotarr/.style={->, line width=0.7pt, color=arrowcol, dotted},
-      brace/.style={decorate, decoration={brace, amplitude=4pt, raise=2pt},
-                    line width=0.5pt, color=metaann},
-    ]
+    >=Stealth,
+    bigbox/.style={draw, rounded corners=4pt, minimum height=0.65cm,
+      font=\small\sffamily, align=center, line width=0.7pt},
+    colbox/.style={draw, minimum width=1.05cm, minimum height=0.38cm,
+      font=\scriptsize\ttfamily, align=center, line width=0.5pt},
+    optbox/.style={draw, rounded corners=2pt, minimum height=0.36cm,
+      font=\scriptsize\sffamily, align=center, line width=0.5pt},
+    negopt/.style={optbox, fill=negcol!50, densely dashed},
+    layerbox/.style={draw=layerborder, rounded corners=5pt, line width=0.8pt,
+      fill=layerbg, inner sep=4pt},
+    layerlbl/.style={font=\scriptsize\sffamily\bfseries, text=arrowcol},
+    ann/.style={font=\tiny\sffamily, text=metaann},
+    arr/.style={->, line width=0.8pt, color=arrowcol},
+    darr/.style={->, line width=0.7pt, color=arrowcol, dashed},
+    dotarr/.style={->, line width=0.7pt, color=arrowcol, dotted},
+    brace/.style={decorate, decoration={brace, amplitude=3pt, raise=2pt},
+                  line width=0.5pt, color=metaann},
+  ]
 
-    % ================================================================
-    %  ROW 1: INPUT → ENCODING → COLUMN FILES
-    % ================================================================
+  % ================================================================
+  %  ROW 1: INPUT (left) + ENCODING (right) — shifted further left
+  % ================================================================
 
-    % -- Input --
-    \node[bigbox, fill=csvcolor, minimum width=2.2cm, minimum height=1cm] (csv) {%
-      \textbf{ResalePrices.csv}\\[-1pt]
-      {\tiny 259{,}237 rows $\times$ 10 cols}\\[-1pt]
-      {\tiny $\sim$55\,MB on disk}};
+  \node[bigbox, fill=csvcolor, minimum width=1.9cm, minimum height=0.8cm]
+        (csv) at (-3.8,0) {%
+    \textbf{ResalePrices.csv}\\[-1pt]
+    {\tiny 259{,}237 rows $\times$ 10 cols}\\[-1pt]
+    {\tiny $\sim$55\,MB on disk}};
 
-    % -- Encoding / Ingest --
-    \node[bigbox, fill=parsecolor, minimum width=2.2cm, minimum height=0.85cm,
-          right=0.8cm of csv] (parser) {%
-      \textbf{CSV Parser}\\[-1pt]
-      {\tiny header auto-detect}\\[-1pt]
-      {\tiny 10/11-col support}};
+  \node[bigbox, fill=parsecolor, minimum width=2.2cm, minimum height=0.65cm,
+        right=0.7cm of csv] (parser) {%
+    \textbf{CSV Parser}\\[-1pt]
+    {\tiny header auto-detect, 10/11-col}};
 
-    \node[optbox, fill=enccolor!70, minimum width=2.6cm,
-          below=0.15cm of parser] (op_ds) {Date String Split};
-    \node[ann, right=1pt of op_ds] {\texttt{YYYY-MM}$\to$u16+u8};
+  \node[optbox, fill=enccolor!70, minimum width=2.2cm,
+        below=0.1cm of parser] (op_ds) {Date String Split};
+  \node[optbox, fill=enccolor!70, minimum width=2.2cm,
+        below=1pt of op_ds] (op_dict) {Dictionary Encoding};
+  \node[optbox, fill=enccolor!70, minimum width=2.2cm,
+        below=1pt of op_dict] (op_ppsm) {PPSM Precompute};
+  \node[optbox, fill=enccolor!70, minimum width=2.2cm,
+        below=1pt of op_ppsm] (op_sort) {Pre-sorted Clustering};
 
-    \node[optbox, fill=enccolor!70, minimum width=2.6cm,
-          below=2pt of op_ds] (op_dict) {Dictionary Encoding};
-    \node[ann, right=1pt of op_dict] {26 towns$\to$u8 ID};
+  \node[ann, right=2pt of op_ds.east, anchor=west] (ann_ds) {\texttt{YYYY-MM}$\to$u16+u8};
+  \node[ann, right=2pt of op_dict.east, anchor=west] {26 towns$\to$u8 ID};
+  \node[ann, right=2pt of op_ppsm.east, anchor=west] {price/area$\to$f32};
+  \node[ann, right=2pt of op_sort.east, anchor=west] (ann_sort) {stable\_sort(Town,Yr,Mo)};
 
-    \node[optbox, fill=enccolor!70, minimum width=2.6cm,
-          below=2pt of op_dict] (op_ppsm) {PPSM Precompute};
-    \node[ann, right=1pt of op_ppsm] {price/area$\to$f32};
+  \begin{scope}[on background layer]
+    \node[layerbox, fit=(parser)(op_sort)(ann_ds)(ann_sort), inner xsep=5pt] (enc_layer) {};
+  \end{scope}
+  \node[layerlbl, above=1pt of enc_layer.north] {Encoding \& Ingest};
 
-    \node[optbox, fill=enccolor!70, minimum width=2.6cm,
-          below=2pt of op_ppsm] (op_sort) {Pre-sorted Clustering};
-    \node[ann, right=1pt of op_sort] {stable\_sort(Town,Yr,Mo)};
+  \draw[arr] (csv) -- (parser);
 
-    \begin{scope}[on background layer]
-      \node[layerbox, fit=(parser)(op_sort)] (enc_layer) {};
-    \end{scope}
-    \node[layerlbl, above=1pt of enc_layer.north] {Encoding \& Ingest};
+  % ================================================================
+  %  ROW 2: PER-COLUMN BINARY FILES — shifted left
+  % ================================================================
 
-    \draw[arr] (csv) -- (parser);
+  \coordinate (col_center) at ($(csv.south)!0.5!(enc_layer.south)$);
 
-    % -- Column files --
-    \node[colbox, fill=colcolor, right=1.5cm of parser.east] (c_yr) {Year {\tiny u16}};
-    \node[colbox, fill=colcolor, right=1pt of c_yr] (c_mo) {Month {\tiny u8}};
-    \node[colbox, fill=colcolor, right=1pt of c_mo] (c_tw) {Town {\tiny u8}};
-    \node[colbox, fill=colcolor, right=1pt of c_tw] (c_ar) {Area {\tiny u16}};
-    \node[colbox, fill=colcolor, right=1pt of c_ar] (c_pr) {Price {\tiny u32}};
-    \node[colbox, fill=derivedcol, right=1pt of c_pr] (c_pp) {PPSM {\tiny f32}};
+  % Column boxes shifted left
+  \node[colbox, fill=colcolor, below=2.4cm of col_center, anchor=north, xshift=-3.5cm] (c_yr) {Year {\tiny u16}};
+  \node[colbox, fill=colcolor, right=4pt of c_yr] (c_mo) {Month {\tiny u8}};
+  \node[colbox, fill=colcolor, right=4pt of c_mo] (c_tw) {Town {\tiny u8}};
+  \node[colbox, fill=colcolor, right=4pt of c_tw] (c_ar) {Area {\tiny u16}};
+  \node[colbox, fill=colcolor, right=4pt of c_ar] (c_pr) {Price {\tiny u32}};
+  \node[colbox, fill=derivedcol, right=4pt of c_pr] (c_pp) {PPSM {\tiny f32}};
 
-    \draw[brace] (c_yr.north west) -- (c_pp.north east)
-      node[midway, above=5pt, ann] {filter working set: 14\,B/row $\approx$ 3.5\,MB (L3-resident)};
+  % Brace text shifted left so the encoding->storage arrow doesn't overlap it
+  \draw[brace] (c_yr.north west) -- (c_pp.north east)
+    node[midway, above=5pt, ann, xshift=-0.6cm] {filter working set: 14\,B/row $\approx$ 3.5\,MB (L3-resident)};
 
-    % bottom row: lazy
-    \node[colbox, fill=white, dashed,
-          below=3pt of c_yr.south west, anchor=north west] (c_bl) {Block};
-    \node[colbox, fill=white, dashed, right=1pt of c_bl] (c_fm) {Flat\_Model};
-    \node[colbox, fill=white, dashed, right=1pt of c_fm] (c_st) {Street};
-    \node[colbox, fill=white, dashed, right=1pt of c_st] (c_sr) {Storey};
-    \node[colbox, fill=white, dashed, right=1pt of c_sr] (c_lc) {Lease};
-    \node[colbox, fill=white, dashed, right=1pt of c_lc] (c_ft) {Flat\_Type};
+  % Lazy-loaded columns
+  \node[colbox, fill=white, dashed,
+        below=6pt of c_yr.south west, anchor=north west] (c_bl) {Block};
+  \node[colbox, fill=white, dashed, right=4pt of c_bl] (c_fm) {Flat\_Mdl};
+  \node[colbox, fill=white, dashed, right=4pt of c_fm] (c_st) {Street};
+  \node[colbox, fill=white, dashed, right=4pt of c_st] (c_sr) {Storey};
+  \node[colbox, fill=white, dashed, right=4pt of c_sr] (c_lc) {Lease};
+  \node[colbox, fill=white, dashed, right=4pt of c_lc] (c_ft) {Flat\_Type};
 
-    \begin{scope}[on background layer]
-      \node[layerbox, fit=(c_yr)(c_pp)(c_ft), inner sep=5pt] (stor_layer) {};
-    \end{scope}
-    \node[layerlbl, above=8pt of stor_layer.north] {Per-Column Binary Files};
+  \begin{scope}[on background layer]
+    \node[layerbox, fit=(c_yr)(c_pp)(c_ft), inner sep=5pt] (stor_layer) {};
+  \end{scope}
+  \node[layerlbl, above=9pt of stor_layer.north] {Per-Column Binary Files};
 
-    \draw[arr] (enc_layer.east) -- (stor_layer.west |- enc_layer.east)
-      node[midway, below=2pt, ann] {one .col file per column};
+  \draw[arr] (enc_layer.south) -- (stor_layer.north -| enc_layer.south)
+    node[midway, right=2pt, ann] {one .col file per column};
 
-    % ================================================================
-    %  ROW 2: PARTITION 
-    % ================================================================
-    \node[optbox, fill=partcol!70, minimum width=7.5cm, minimum height=0.55cm,
-          below=0.8cm of stor_layer.south west, anchor=north west] (part) {%
-      \textbf{Hive-style Town Partitioning}};
-    \node[ann, below=1pt of part.south west, anchor=north west]
-      (part_ann1) {\texttt{columns\_e1/JURONG\_WEST/\{year,month,area,\ldots\}.col}};
-    \node[ann, below=0pt of part_ann1.south west, anchor=north west]
-      (part_ann2) {loads only target towns $\to$ 42.9K of 259.2K rows (83\% pruned), 660\,KB memory};
+  % ================================================================
+  %  ROW 3: THREE-COLUMN LAYOUT — I/O | Index+Metadata | Partition
+  % ================================================================
 
-    \draw[dotarr] ($(stor_layer.south west) + (2.5, 0)$) -- ($(part.north west) + (2.5, 0)$) 
-      node[midway, right, ann] {split by town};
+% -- I/O Layer (left) — anchored to left side of stor_layer --
+  \node[optbox, fill=iocol!60, minimum width=2.6cm, minimum height=0.40cm,
+        below=1.3cm of stor_layer.south west, anchor=north, xshift=-1.5cm] (io_chunk)
+    {\textbf{Chunked Streaming}};
+  \node[ann, below=1pt of io_chunk.south, anchor=north]
+    (io_chunk_ann) {\tiny chunks outer, queries inner};
 
-    % ================================================================
-    %  ROW 3: I/O LAYER (Enlarged)
-    % ================================================================
+  % Increased gap from 0.25cm to 0.45cm to avoid text overlap
+  \node[optbox, fill=iocol!60, minimum width=2.6cm, minimum height=0.40cm,
+        below=0.45cm of io_chunk] (io_mmap) {\textbf{Memory-Mapped I/O}};
+  \node[ann, below=1pt of io_mmap.south, anchor=north]
+    (io_mmap_ann) {\tiny mmap(2) + memcpy; 45\% faster};
 
-    % Shifted left, made wider and taller, with bigger vertical gaps for the text.
-    \node[optbox, fill=iocol!60, minimum width=4.0cm, minimum height=0.6cm, 
-          below=4.8cm of csv.west, anchor=north west] (io_chunk) {\textbf{Chunked Streaming I/O}};
-    \node[ann, below=-1pt of io_chunk, anchor=north, align=center] (io_chunk_ann)
-      {\tiny loop inversion:\\chunks outer, queries inner};
+  \node[ann, text=red!70!black, below=0.05cm of io_mmap_ann]
+    (io_excl) {$\oplus$ mutually exclusive};
 
-    \node[optbox, fill=iocol!60, minimum width=4.0cm, minimum height=0.6cm,
-          below=0.85cm of io_chunk] (io_mmap) {\textbf{Memory-Mapped I/O}};
-    \node[ann, below=-1pt of io_mmap, anchor=north] (io_mmap_ann)
-      {\tiny mmap(2) + memcpy; 45\% load reduction};
+  \begin{scope}[on background layer]
+    \node[layerbox, fit=(io_chunk)(io_mmap)(io_excl)(io_chunk_ann)(io_mmap_ann), inner sep=4pt] (io_layer) {};
+  \end{scope}
+  % I/O Layer label shifted left to avoid arrow overlap
+  \node[layerlbl, above=1pt of io_layer.north, xshift=-0.8cm] {I/O Layer};
 
-    \node[ann, text=red!70!black, below=0.2cm of io_mmap_ann]
-      (io_excl) {$\oplus$ mutually exclusive};
+  % Arrow from left side of stor_layer down to I/O layer
+  \draw[arr, rounded corners=3pt]
+    (stor_layer.south west) ++(0.3, 0) -- ++(0, -0.4) -| (io_layer.north);
 
-    \begin{scope}[on background layer]
-      % Now cleanly capturing the expanded boxes and their text annotations
-      \node[layerbox, fit=(io_chunk)(io_mmap)(io_excl)(io_chunk_ann)(io_mmap_ann), inner sep=6pt] (io_layer) {};
-    \end{scope}
-    \node[layerlbl, above=1pt of io_layer.north] {I/O Layer};
+  % -- Index & Metadata (center) --
+  \node[optbox, fill=indexcol!60, minimum width=2.6cm, minimum height=0.38cm,
+        right=1.0cm of io_chunk, yshift=0cm] (idx_zm) {\textbf{Zone Maps}};
+  \node[ann, right=3pt of idx_zm.east, anchor=west] {96.1\% skip};
 
-    \draw[arr, rounded corners=4pt] 
-      ($(stor_layer.south west) + (-0.3, 0)$) |- 
-      ($(io_layer.north) + (0, 0.6)$) -| 
-      (io_layer.north);
+  \node[optbox, fill=indexcol!60, minimum width=2.6cm, minimum height=0.38cm,
+        below=0.1cm of idx_zm] (idx_bm) {\textbf{Bitmap Town Index}};
+  \node[ann, right=3pt of idx_bm.east, anchor=west] {26 bit-vectors};
 
-    % ================================================================
-    %  ROW 4: INDEX LAYER (Moved directly below I/O)
-    % ================================================================
+  \node[optbox, fill=indexcol!60, minimum width=2.6cm, minimum height=0.38cm,
+        below=0.1cm of idx_bm] (idx_bs) {\textbf{Binary Search}};
+  \node[ann, right=3pt of idx_bs.east, anchor=west] {$O(\log N)$};
 
-    \node[optbox, fill=indexcol!60, minimum width=3.6cm, minimum height=0.5cm,
-          below=1.5cm of io_excl, anchor=north] (idx_zm) {\textbf{Zone Maps}};
-    \node[ann, right=1pt of idx_zm] {254 chunks, 96.1\% skip};
+  \node[optbox, fill=partcol!40, minimum width=2.6cm, minimum height=0.38cm,
+        below=0.1cm of idx_bs] (idx_tp) {\textbf{Town Part.\ Bounds}};
+  \node[ann, right=3pt of idx_tp.east, anchor=west] {[begin,end)};
 
-    \node[optbox, fill=indexcol!60, minimum width=3.6cm, minimum height=0.5cm,
-          below=0.22cm of idx_zm] (idx_bm) {\textbf{Bitmap Town Index}};
-    \node[ann, right=1pt of idx_bm] {26 bit-vectors OR'd};
+  \begin{scope}[on background layer]
+    \node[layerbox, fit=(idx_zm)(idx_tp), inner sep=4pt] (idx_layer) {};
+  \end{scope}
+  \node[layerlbl, above=1pt of idx_layer.north] {Index \& Metadata};
 
-    \node[optbox, fill=indexcol!60, minimum width=3.6cm, minimum height=0.5cm,
-          below=0.22cm of idx_bm] (idx_bs) {\textbf{Binary Search}};
-    \node[ann, right=1pt of idx_bs] {$O(\log N)$ on sorted key};
+  \draw[arr] (io_layer.east) -- (idx_layer.west |- io_layer.east);
 
-    \node[optbox, fill=partcol!40, minimum width=3.6cm, minimum height=0.5cm,
-          below=0.22cm of idx_bs] (idx_tp) {\textbf{Town Partition Bounds}};
-    \node[ann, right=1pt of idx_tp] {[begin,end) per town};
+  % -- Partition (right, same row) --
+  \coordinate (part_anchor) at ($(idx_layer.east) + (3.0cm, 0)$);
+  \node[optbox, fill=partcol!70, minimum width=2.6cm, minimum height=0.45cm,
+        anchor=center] (part) at (part_anchor)
+    {\textbf{Hive-style}\\[-1pt]{\textbf{Town Partition}}};
+  \node[ann, below=1pt of part.south, anchor=north, align=center]
+    (part_ann1) {\texttt{.../JURONG\_WEST/\{...\}.col}};
+  \node[ann, below=0pt of part_ann1.south, anchor=north]
+    (part_ann2) {42.9K of 259.2K rows (83\% pruned)};
 
-    \begin{scope}[on background layer]
-      \node[layerbox, fit=(idx_zm)(idx_tp), inner sep=6pt] (idx_layer) {};
-    \end{scope}
-    \node[layerlbl, above=1pt of idx_layer.north] {Index \& Metadata};
+  \draw[dotarr, rounded corners=3pt] (stor_layer.south -| part.north) -- (part.north)
+    node[midway, right=2pt, ann] {split by town};
 
-    % Straight arrow from I/O down to Index
-    \draw[arr] (io_layer.south) -- (idx_layer.north);
+  % ================================================================
+  %  ROW 4: QUERY ENGINE — full width below the three-column row
+  % ================================================================
 
-    % ================================================================
-    %  ROW 4: QUERY ENGINE (To the right of Index Layer)
-    % ================================================================
+  \coordinate (eng_top) at ($(io_layer.south)!0.5!(idx_layer.south) + (0, -1.1cm)$);
 
-    \node[optbox, fill=reusecol!60, minimum width=5.0cm, minimum height=0.5cm,
-          right=1.5cm of idx_zm.east, anchor=north west] (p_reuse)
-      {\textbf{Cumulative Table Reuse}};
-    \node[ann, below=-1pt of p_reuse, anchor=north, align=center] (reuse_ann)
-      {\tiny $O(N)$ build $\to$ X-sweep $\to$ Y-sweep\\$\to$ $O(1)$ lookup per $(x,y)$};
+  \node[optbox, fill=reusecol!60, minimum width=9.5cm, minimum height=0.40cm,
+        anchor=north] (p_reuse) at (eng_top)
+    {\textbf{Cumulative Table Reuse}\quad
+     {\tiny $O(N)$ build $\to$ X-sweep $\to$ Y-sweep $\to$ $O(1)$ per $(x,y)$}};
 
-    \node[optbox, fill=scancol!50, minimum width=5.0cm, minimum height=0.5cm,
-          below=0.5cm of p_reuse] (p_scan)
-      {\textbf{Unified Predicate Scan}};
+  \node[optbox, fill=scancol!50, minimum width=9.5cm, minimum height=0.40cm,
+        below=0.2cm of p_reuse] (p_scan)
+    {\textbf{Unified Predicate Scan}};
 
-    \node[optbox, fill=scancol!30, minimum width=1.45cm, minimum height=0.34cm,
-          below=3pt of p_scan.south west, anchor=north west,
-          font=\tiny\sffamily] (sf1) {Dict Compare};
-    \node[optbox, fill=scancol!30, minimum width=1.45cm, minimum height=0.34cm,
-          right=2pt of sf1, font=\tiny\sffamily] (sf2) {Chunk Skip};
-    \node[optbox, fill=scancol!30, minimum width=1.45cm, minimum height=0.34cm,
-          right=2pt of sf2, font=\tiny\sffamily] (sf3) {Bitmap Mask};
+  % Sub-options grid
+  \node[optbox, fill=scancol!30, minimum width=1.4cm, minimum height=0.30cm,
+        below=2pt of p_scan.south west, anchor=north west,
+        font=\tiny\sffamily] (sf1) {Dict Compare};
+  \node[optbox, fill=scancol!30, minimum width=1.4cm, minimum height=0.30cm,
+        right=2pt of sf1, font=\tiny\sffamily] (sf2) {Chunk Skip};
+  \node[optbox, fill=scancol!30, minimum width=1.4cm, minimum height=0.30cm,
+        right=2pt of sf2, font=\tiny\sffamily] (sf3) {Bitmap Mask};
+  \node[optbox, fill=scancol!30, minimum width=1.4cm, minimum height=0.30cm,
+        right=2pt of sf3, font=\tiny\sffamily] (sf4) {Late Materialise};
+  \node[negopt, minimum width=1.4cm, minimum height=0.30cm,
+        right=2pt of sf4, font=\tiny\sffamily] (sf5) {Pred.\ Reorder};
+  \node[optbox, fill=scancol!30, minimum width=1.4cm, minimum height=0.30cm,
+        right=2pt of sf5, font=\tiny\sffamily] (sf6) {Int Early-Exit};
 
-    \node[optbox, fill=scancol!30, minimum width=1.45cm, minimum height=0.34cm,
-          below=2pt of sf1, font=\tiny\sffamily] (sf4) {Late Materialise};
-    \node[negopt, minimum width=1.45cm, minimum height=0.34cm,
-          right=2pt of sf4, font=\tiny\sffamily] (sf5) {Pred.\ Reorder};
-    \node[optbox, fill=scancol!30, minimum width=1.45cm, minimum height=0.34cm,
-          right=2pt of sf5, font=\tiny\sffamily] (sf6) {Int Early-Exit};
+  \node[optbox, fill=derivedcol!60, minimum width=1.4cm, minimum height=0.30cm,
+        below=2pt of sf1, font=\tiny\sffamily] (sf7) {Precomp.\ PPSM};
 
-    \node[optbox, fill=derivedcol!60, minimum width=1.45cm, minimum height=0.34cm,
-          below=2pt of sf4, font=\tiny\sffamily] (sf7) {Precomp.\ PPSM};
+  \node[ann, right=3pt of sf6.east, anchor=west]
+    (pred_ann) {\color{red!70!black}90\% pruned at Year};
 
-    \node[ann, right=2pt of sf7.east]
-      (pred_ann) {Year$\to$Mo$\to$Town$\to$Area {\color{red!70!black}(90\% at Year)}};
+  \node[optbox, fill=partcol!50, minimum width=9.5cm, minimum height=0.40cm,
+        below=0.2cm of sf7.south west, anchor=north west] (p_fast)
+    {\textbf{Sorted Partition + Binary Search}\quad
+     {\tiny $O(\log N)$ per town; 99.5\% reduction}};
 
-    \node[optbox, fill=partcol!50, minimum width=5.0cm, minimum height=0.5cm,
-          below=0.35cm of sf7] (p_fast)
-      {\textbf{Sorted Partition + Binary Search}};
-    \node[ann, below=-1pt of p_fast, anchor=north]
-      {\tiny $O(\log N)$ per town; 751.7K rows (99.5\% reduction)};
+  \begin{scope}[on background layer]
+    \node[layerbox, fit=(p_reuse)(p_scan)(sf1)(sf6)(sf7)(pred_ann)(p_fast), inner sep=5pt] (eng_layer) {};
+  \end{scope}
+  \node[layerlbl, above=1pt of eng_layer.north] {Query Engine};
 
-    \begin{scope}[on background layer]
-      \node[layerbox, fit=(p_reuse)(reuse_ann)(p_scan)(sf1)(sf3)(sf4)(sf5)(sf6)(sf7)(pred_ann)(p_fast), inner sep=7pt] (eng_layer) {};
-    \end{scope}
-    \node[layerlbl, above=1pt of eng_layer.north] {Query Engine};
+  % -- Arrows into Query Engine --
+  \draw[arr, rounded corners=3pt] (idx_layer.south) -- ++(0, -0.4) -| (eng_layer.north -| idx_layer.south);
+  \draw[dotarr, rounded corners=3pt] (part_ann2.south) -- ++(0, -0.2) -| (eng_layer.north -| part.south)
+    node[pos=0.0, right=2pt, ann] {pruned rows};
 
-    % Arrow connecting Index to Engine
-    \draw[arr] (idx_layer.east |- idx_zm.center) -- (eng_layer.west |- idx_zm.center);
+  % ================================================================
+  %  ROW 5: OUTPUT + EVAL SIDE-BY-SIDE
+  % ================================================================
+  \node[bigbox, fill=outcolor, minimum width=1.7cm, minimum height=0.8cm,
+        below=0.8cm of eng_layer.south, anchor=north, xshift=-2.0cm] (output) {%
+    \textbf{ScanResult.csv}\\[-1pt]
+    {\tiny 568 rows}\\[-1pt]
+    {\tiny min PPSM per $(x,y)$}};
 
-    % Straight down arrow from partition to the engine block
-    \draw[dotarr] (part_ann2.south -| eng_layer.north) -- (eng_layer.north) 
-      node[midway, right, ann] {pruned rows};
+  \draw[arr, line width=1pt] (eng_layer.south -| output.north) -- (output.north)
+    node[midway, right=2pt, ann] {winners};
 
-    % -- Output --
-    \node[bigbox, fill=outcolor, minimum width=2.0cm, minimum height=1cm,
-          right=1.2cm of p_scan.east] (output) {%
-      \textbf{ScanResult.csv}\\[-1pt]
-      {\tiny 568 rows}\\[-1pt]
-      {\tiny min PPSM per $(x,y)$}};
+  \node[draw=arrowcol!40, rounded corners=3pt, fill=white,
+        minimum width=4.5cm, minimum height=0.65cm,
+        font=\scriptsize\sffamily, align=center,
+        right=0.8cm of output] (eval) {%
+    \textbf{Eval Suite:} ${\sim}$40 configs
+    $\times$ 568 queries\\[-1pt]
+    {\tiny byte-identical}};
 
-    \draw[arr, line width=1pt] (eng_layer.east |- output) -- (output)
-      node[midway, above, ann] {winners};
+  \draw[->, line width=0.5pt, color=arrowcol!50, dashed]
+    (output.east) -- (eval.west);
 
-    % Lazy mat arrow dropping from way up top
-    \draw[darr, rounded corners=4pt]
-      (stor_layer.east) -- ++(0.5,0) |- ($(output.north)+(0,0.8)$) -- (output.north)
-      node[pos=0.25, above, ann] {lazy-load display cols for winning rows};
+  % Lazy materialisation arrow from storage to output
+  % Routed right, down below eval, then left and up to avoid all overlap
+  \coordinate (lazy_right) at ($(eval.east) + (3.2, 0)$);
+  \coordinate (lazy_bottom) at ($(eval.south) + (0, -0.8)$);
+  \draw[darr, rounded corners=3pt]
+    (stor_layer.east) 
+    -- (lazy_right |- stor_layer.east) 
+    -- (lazy_right |- lazy_bottom) 
+    -- (output.south east |- lazy_bottom) 
+    -- (output.south east);
+  \node[ann, rotate=90, anchor=south] at ($(lazy_right |- output.east) + (0.1, 0)$)
+    {lazy-load display cols};
 
-    % ================================================================
-    %  EVAL SUITE
-    % ================================================================
-    \node[draw=arrowcol!40, rounded corners=3pt, fill=white,
-          minimum width=10cm, minimum height=0.5cm,
-          font=\scriptsize\sffamily, align=center,
-          below=1.6cm of p_fast.south] (eval) {%
-      \textbf{Evaluation Suite:} ${\sim}$40 flag configurations
-      $\times$ 568 queries --- byte-identical correctness};
+  % ================================================================
+  %  LEGEND (single row) — more spaced out between each item
+  % ================================================================
+  \coordinate (legstart) at ($(output.south west) + (0, -0.5)$);
+  \node[anchor=north west] at (legstart) {%
+    \begin{tikzpicture}[baseline=(current bounding box.center)]
+      \node[colbox, fill=colcolor, minimum width=0.35cm, minimum height=0.20cm] at (0,0) {};
+      \node[right, font=\tiny\sffamily] at (0.25,0) {filter};
 
-    % Fixed straight drop arrow
-    \draw[->, line width=0.5pt, color=arrowcol!50, dashed]
-      (eng_layer.south) -- (eval.north -| eng_layer.south);
+      \node[colbox, fill=derivedcol, minimum width=0.35cm, minimum height=0.20cm] at (1.2,0) {};
+      \node[right, font=\tiny\sffamily] at (1.45,0) {derived};
 
-    % ================================================================
-    %  LEGEND
-    % ================================================================
-    \node[below=0.5cm of eval.south, anchor=north] (leganchor) {};
-    \node[font=\scriptsize\sffamily, anchor=north] at (leganchor) {%
-      \begin{tikzpicture}[baseline=(current bounding box.center)]
-        \node[colbox, fill=colcolor, minimum width=0.5cm, minimum height=0.26cm] at (0,0) {};
-        \node[right, font=\tiny\sffamily] at (0.38,0) {filter col};
+      \node[colbox, fill=white, dashed, minimum width=0.35cm, minimum height=0.20cm] at (2.7,0) {};
+      \node[right, font=\tiny\sffamily] at (2.95,0) {lazy};
 
-        \node[colbox, fill=derivedcol, minimum width=0.5cm, minimum height=0.26cm] at (1.8,0) {};
-        \node[right, font=\tiny\sffamily] at (2.18,0) {derived};
+      \node[optbox, fill=negcol!50, densely dashed,
+            minimum width=0.35cm, minimum height=0.20cm,
+            font=\tiny\sffamily] at (3.9,0) {};
+      \node[right, font=\tiny\sffamily] at (4.15,0) {negative};
 
-        \node[colbox, fill=white, dashed, minimum width=0.5cm, minimum height=0.26cm] at (3.5,0) {};
-        \node[right, font=\tiny\sffamily] at (3.88,0) {lazy-loaded};
+      \draw[arr, line width=0.5pt] (5.4,0) -- (5.75,0);
+      \node[right, font=\tiny\sffamily] at (5.8,0) {data};
 
-        \node[optbox, fill=negcol!50, densely dashed,
-              minimum width=0.5cm, minimum height=0.26cm,
-              font=\tiny\sffamily] at (5.4,0) {};
-        \node[right, font=\tiny\sffamily] at (5.78,0) {negative result};
+      \draw[darr, line width=0.5pt] (6.6,0) -- (6.95,0);
+      \node[right, font=\tiny\sffamily] at (7.0,0) {lazy};
 
-        \draw[arr, line width=0.5pt] (7.4,0) -- (7.85,0);
-        \node[right, font=\tiny\sffamily] at (7.9,0) {data flow};
-
-        \draw[darr, line width=0.5pt] (9.1,0) -- (9.55,0);
-        \node[right, font=\tiny\sffamily] at (9.6,0) {lazy};
-
-        \draw[dotarr, line width=0.5pt] (10.5,0) -- (10.95,0);
-        \node[right, font=\tiny\sffamily] at (11.0,0) {partition};
-      \end{tikzpicture}
-    };
+      \draw[dotarr, line width=0.5pt] (7.8,0) -- (8.15,0);
+      \node[right, font=\tiny\sffamily] at (8.2,0) {partition};
+    \end{tikzpicture}
+  };
 
   \end{tikzpicture}
   \caption{Data Flow and Processing Architecture}
   \label{fig:data_architecture}
 \end{figure}
 
+\vspace{0.7cm}
+
 \begin{figure}[H]\centering
-  % \includegraphics[width=\linewidth]{figs/excel_extra.png}
-  \caption{Extended cross-validation for additional $(x,y)$ pairs. All engine outputs match Excel \texttt{MINIFS} results.}\label{fig:excel-extra}
+  \begin{subfigure}[t]{\linewidth}\centering
+    \includegraphics[width=0.7\linewidth]{excel_script_output.png}
+    \caption{Office Script editor and Validation sheet output.}\label{fig:excel-script}
+  \end{subfigure}
+
+  \vspace{0.3cm}
+
+  \begin{subfigure}[t]{\linewidth}\centering
+    \includegraphics[width=0.7\linewidth]{scanresult_csv_match.png}
+    \caption{Matching rows in \texttt{ScanResult\_U2220136J.csv}.}\label{fig:csv-match}
+  \end{subfigure}
+  \caption{Excel cross-validation: Office Script output (above) vs.\ engine CSV output (below). PPSM values match exactly for all tested pairs.}\label{fig:excel-extra}
 \end{figure}
 
 \begin{figure}[H]\centering
-  % \includegraphics[width=\linewidth]{figs/speedup_full.pdf}
-  \caption{Speedup vs.\ baseline across all configurations. Three independent scan-elimination paths visible: C1+C2 result reuse (749$\times$), A2+B3 pre-sort+binary search (193$\times$), and E1+C1C2 partition+reuse (3{,}389$\times$).}\label{fig:speedup-full}
+  \begin{tikzpicture}
+\begin{groupplot}[
+    group style={
+        group size=1 by 2,
+        vertical sep=100pt,
+        xlabels at=edge bottom,
+    },
+    ybar,
+    /pgf/bar width=3pt,
+    width=\linewidth,
+    height=5.5cm,
+    ymode=log,
+    log origin=infty,
+    ymin=0.04, ymax=6000,
+    ylabel={\textbf{Speedup (log)}},
+    ylabel style={font=\scriptsize},
+    ytick={0.1,1,10,100,1000},
+    yticklabels={$0.1\times$,$1\times$,$10\times$,$100\times$,$1{,}000\times$},
+    y tick label style={font=\scriptsize},
+    ymajorgrids=true,
+    grid style={gray!25},
+    enlarge x limits={abs=4pt},
+    clip=false,
+]
+
+% ══════════════════════════════════════════════════════════════
+% ROW 1: Configurations 0–25 (Encoding → Columnar)
+% ══════════════════════════════════════════════════════════════
+\nextgroupplot[
+    title={\textbf{Encoding, Scan, Indexing, Columnar}},
+    title style={font=\small, yshift=2pt},
+    xmin=-0.5, xmax=25.5,
+    xtick={0,1,...,25},
+    xticklabels={
+        Baseline,
+        Dict,
+        Result Reuse,
+        Dict+Reuse,
+        PPSM,
+        IntMul,
+        PredReorder,
+        {PPSM+IM+PR},
+        {Dict+PPSM+IM+PR},
+        {Dict+PPSM+IM+PR+R},
+        ZoneMaps,
+        Dict+ZM,
+        {ZM+PPSM+IM+PR},
+        Bitmap,
+        Dict+Bitmap,
+        Presort+Bitmap,
+        ZM+Bitmap,
+        LateMat+Bitmap,
+        {FullStack+Bitmap},
+        Reuse+ZM,
+        LateMat,
+        Dict+LateMat,
+        {Dict+LateMat+PR},
+        AllScanOpts,
+        AllScan+ZM,
+        ColFiles,
+    },
+    x tick label style={rotate=72, anchor=east, font=\fontsize{6}{7}\selectfont},
+    legend style={
+        at={(0.02,0.98)}, anchor=north west,
+        font=\fontsize{5}{6.5}\selectfont,
+        cells={anchor=west},
+        column sep=2pt,
+        legend columns=3,
+        draw=gray!50,
+        fill=white,
+        fill opacity=0.92,
+    },
+]
+
+% 1x reference line
+\addplot[dashed, gray!60, line width=0.6pt, forget plot, sharp plot]
+  coordinates {(-1,1) (27,1)};
+
+% baseline (0)
+\addplot[ybar, fill=spBase, draw=seBase, line width=0.3pt, forget plot]
+  coordinates {(0,1.00)};
+
+% encoding (1,4)
+\addplot[ybar, fill=spEnc, draw=seEnc, line width=0.3pt, forget plot]
+  coordinates {(1,1.46) (4,1.00)};
+
+% reuse (2,3,9,19)
+\addplot[ybar, fill=spReuse, draw=seReuse, line width=0.3pt, forget plot]
+  coordinates {(2,498.82) (3,748.77) (9,748.96) (19,504.94)};
+
+% scan (5,20,21)
+\addplot[ybar, fill=spScan, draw=seScan, line width=0.3pt, forget plot]
+  coordinates {(5,1.00) (20,0.99) (21,1.46)};
+
+% index (10,11)
+\addplot[ybar, fill=spIdx, draw=seIdx, line width=0.3pt, forget plot]
+  coordinates {(10,1.34) (11,2.37)};
+
+% negative (6,7,8,12,13,14,15,16,17,18,22,23,24)
+\addplot[ybar, fill=spNeg, draw=seNeg, line width=0.3pt, forget plot]
+  coordinates {
+    (6,0.06) (7,0.06) (8,0.19) (12,0.36)
+    (13,0.15) (14,0.15) (15,0.14) (16,0.15) (17,0.15) (18,0.06)
+    (22,0.19) (23,0.19) (24,0.36)
+  };
+
+% columnar (25)
+\addplot[ybar, fill=spCol, draw=seCol, line width=0.3pt, forget plot]
+  coordinates {(25,0.98)};
+
+% Annotation: C1+C2 path
+\node[font=\fontsize{5.5}{6.5}\selectfont\bfseries, text=seReuse, anchor=south, align=center]
+  at (axis cs:3, 748.77) [yshift=4pt] {C1+C2\\[-1pt]749$\times$};
+
+% Legend (shown only on top plot)
+\addlegendimage{area legend, fill=spBase, draw=seBase}     \addlegendentry{Baseline}
+\addlegendimage{area legend, fill=spEnc, draw=seEnc}       \addlegendentry{Encoding}
+\addlegendimage{area legend, fill=spReuse, draw=seReuse}   \addlegendentry{Result Reuse}
+\addlegendimage{area legend, fill=spPresort, draw=sePresort} \addlegendentry{Pre-sort + BSearch}
+\addlegendimage{area legend, fill=spRLE, draw=seRLE}         \addlegendentry{RLE Town (A5)}
+\addlegendimage{area legend, fill=spPart, draw=sePart}     \addlegendentry{Town Partition}
+\addlegendimage{area legend, fill=spIdx, draw=seIdx}       \addlegendentry{Index (Zone Maps)}
+\addlegendimage{area legend, fill=spScan, draw=seScan}     \addlegendentry{Scan Opts}
+\addlegendimage{area legend, fill=spCol, draw=seCol}       \addlegendentry{Columnar Files}
+\addlegendimage{area legend, fill=spIO, draw=seIO}         \addlegendentry{I/O (Chunked / mmap)}
+\addlegendimage{area legend, fill=spNeg, draw=seNeg}       \addlegendentry{Negative ($<1\times$)}
+\addlegendimage{area legend, fill=spCombo, draw=seCombo}   \addlegendentry{Combined}
+
+% ══════════════════════════════════════════════════════════════
+% ROW 2: Configurations 26–50 (Columnar cont. → PreSort combos)
+% ══════════════════════════════════════════════════════════════
+\nextgroupplot[
+    title={\textbf{I/O, Partitioning, Pre-sort, and Combined Configurations}},
+    title style={font=\small, yshift=2pt},
+    xmin=-0.5, xmax=31.5,
+    xtick={0,1,...,31},
+    xticklabels={
+        ColFiles+Dict,
+        ColAll,
+        ColFiles+Reuse,
+        ColFiles+All,
+        {Chunk 50MB},
+        {Chunk 10MB},
+        {Chunk 5MB},
+        {Chunk 2MB},
+        {Chunk 1MB},
+        Chunk+LateMat,
+        mmap,
+        mmap+All,
+        mmap+Reuse,
+        TownPart,
+        {TownPart+Dict+PS},
+        TownPart+ZM,
+        TownPart+Reuse,
+        TownPart+All,
+        PreSort,
+        MonthBSearch,
+        {PreSort+BSearch},
+        {Dict+PS+BSearch},
+        {PS+BS+PPSM+IM},
+        {Col+PS+BS+PPSM+IM},
+        {Col+PS+BSearch},
+        {RLE Town},
+        {PS+RLE},
+        {Dict+PS+RLE},
+        {BS+PS+RLE},
+        {LateMat+PS+RLE},
+        {FullStack+A5},
+        {Col+PS+RLE+BS},
+    },
+    x tick label style={rotate=72, anchor=east, font=\fontsize{6}{7}\selectfont},
+]
+
+% 1x reference line
+\addplot[dashed, gray!60, line width=0.6pt, forget plot, sharp plot]
+  coordinates {(-1,1) (33,1)};
+
+% columnar (0=26, 1=27)
+\addplot[ybar, fill=spCol, draw=seCol, line width=0.3pt, forget plot]
+  coordinates {(0,1.43) (1,0.35)};
+
+% reuse (2=28, 12=38)
+\addplot[ybar, fill=spReuse, draw=seReuse, line width=0.3pt, forget plot]
+  coordinates {(2,49.39) (12,59.94)};
+
+% combo (3=29, 11=37)
+\addplot[ybar, fill=spCombo, draw=seCombo, line width=0.3pt, forget plot]
+  coordinates {(3,50.30) (11,50.51)};
+
+% io (4–9 = 30–35)
+\addplot[ybar, fill=spIO, draw=seIO, line width=0.3pt, forget plot]
+  coordinates {(4,6.17) (5,6.19) (6,6.15) (7,6.13) (8,5.73) (9,5.97)};
+
+% negative (10=36, 19=45)
+\addplot[ybar, fill=spNeg, draw=seNeg, line width=0.3pt, forget plot]
+  coordinates {(10,0.14) (19,0.92)};
+
+% partition (13–17 = 39–43)
+\addplot[ybar, fill=spPart, draw=sePart, line width=0.3pt, forget plot]
+  coordinates {(13,11.03) (14,11.05) (15,13.69) (16,3389.16) (17,3402.58)};
+
+% presort (18=44, 20=46, 21=47, 22=48, 23=49, 24=50)
+\addplot[ybar, fill=spPresort, draw=sePresort, line width=0.3pt, forget plot]
+  coordinates {(18,1.00) (20,193.12) (21,170.50) (22,140.21) (23,24.35) (24,33.20)};
+  
+% RLE (25–31)
+\addplot[ybar, fill=spRLE, draw=seRLE, line width=0.3pt, forget plot]
+  coordinates {(25,10.47) (26,10.94) (27,10.85) (28,179.95) (29,10.95) (30,141.80) (31,44.03)};
+
+% Annotation: A5 standalone
+\node[font=\fontsize{5.5}{6.5}\selectfont\bfseries, text=seRLE, anchor=south, align=center]
+  at (axis cs:25, 10.47) [yshift=4pt] {10.5$\times$};
+
+% Annotation: E1+C1C2 path
+\node[font=\fontsize{5.5}{6.5}\selectfont\bfseries, text=sePart, anchor=south, align=center]
+  at (axis cs:16, 3389.16) [yshift=4pt] {3{,}389$\times$};
+
+% Annotation: A2+B3 path
+\node[font=\fontsize{5.5}{6.5}\selectfont\bfseries, text=sePresort, anchor=south, align=center]
+  at (axis cs:20, 193.12) [yshift=4pt] {193$\times$};
+
+\end{groupplot}
+\end{tikzpicture}
+
+  \caption{Speedup vs.\ baseline across all configurations (log scale, two rows).}\label{fig:speedup-full}
+\end{figure}
+ 
+\begin{figure}[H]
+\lstset{
+  language=C++, basicstyle=\ttfamily\fontsize{7}{8.5}\selectfont,
+  keywordstyle=\bfseries, commentstyle=\itshape\color{gray},
+  numbers=left, numberstyle=\tiny\color{gray}, numbersep=4pt,
+  breaklines=true, columns=flexible, xleftmargin=1.2em,
+  aboveskip=2pt, belowskip=2pt, frame=none,
+  morekeywords={uint16_t,uint8_t,size_t,MinEntry,ColumnStore,vector,string,unordered_set}
+}
+
+\begin{minipage}[t]{0.54\linewidth}
+\begin{lstlisting}[name=cumulTable]
+std::vector<std::vector<MinEntry>> buildCumulativeTable(
+    const ColumnStore& db, uint16_t target_year,
+    uint8_t start_month, const std::vector<std::string>& towns) {
+  const std::size_t N = db.size();
+  std::vector<std::vector<MinEntry>> per_x(9, std::vector<MinEntry>(151));
+  // Pre-resolve town IDs (dict-encoded) or build hash set (string path)
+  std::unordered_set<std::string> town_set;
+  std::vector<uint16_t> town_ids;
+  if (db.use_dict_encoding)
+    for (auto& t : towns) { uint16_t id; if (db.dict_town.lookup(t,id)) town_ids.push_back(id); }
+  else town_set.insert(towns.begin(), towns.end());
+ 
+  // --- Step 1: Single O(N) scan --- per-(offset, bucket) minimum ---
+  for (std::size_t i = 0; i < N; ++i) {
+    if (db.col_month_year[i] != target_year) continue;           // year filter
+    const uint8_t month = db.col_month_month[i];
+    if (month < start_month) continue;
+    int offset = int(month) - int(start_month) + 1;
+    if (offset < 1 || offset > 8) continue;                      // month range
+    if (db.use_dict_encoding) {                                   // town filter
+      bool match = false; uint16_t rid = db.col_town_encoded[i];
+      for (auto& tid : town_ids) if (rid == tid) { match=true; break; }
+      if (!match) continue;
+    } else { if (town_set.find(db.col_town[i]) == town_set.end()) continue; }
+    const unsigned area = db.col_floor_area[i];
+    if (area < 80) continue;                                      // below all y
+    const unsigned bucket = (area > 150) ? 150u : area;           // clamp
+    const double ppsm = db.use_precomputed_ppsm
+        ? db.col_price_per_sqm[i]
+        : double(db.col_resale_price[i]) / double(db.col_floor_area[i]);
+    MinEntry& e = per_x[offset][bucket];
+    if (!e.has || ppsm < e.ppsm) { e.has=true; e.ppsm=ppsm; e.idx=i; }
+  }
+\end{lstlisting}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.44\linewidth}
+\begin{lstlisting}[name=cumulTable]
+  // --- Step 2: X-sweep --- cumulative min across month offsets ---
+  std::vector<std::vector<MinEntry>> cum_x(9, std::vector<MinEntry>(151));
+  for (int area = 80; area <= 150; ++area) {
+    MinEntry running;
+    for (int off = 1; off <= 8; ++off) {
+      if (per_x[off][area].has)
+        if (!running.has || per_x[off][area].ppsm < running.ppsm) running = per_x[off][area];
+      cum_x[off][area] = running;
+    }
+  }
+  // --- Step 3: Y-sweep --- propagate min from higher to lower area ---
+  for (int off = 1; off <= 8; ++off)
+    for (int area = 149; area >= 80; --area) {
+      const MinEntry& hi = cum_x[off][area+1]; MinEntry& lo = cum_x[off][area];
+      if (hi.has && (!lo.has || hi.ppsm < lo.ppsm)) lo = hi;
+    }
+  return cum_x;  // O(1) lookup: cum_x[x][y]
+}
+\end{lstlisting}
+\end{minipage}
+
+\vspace{-2pt}
+\centering\small
+\textbf{Complexity:} Step~1 $= O(N)$ $|$ Steps~2+3 $= O(1)$ $|$ Query: $568 \times O(1)$ lookups 
+\caption{C++ implementation of \texttt{buildCumulativeTable} from \texttt{query\_engine.cpp}.}\label{fig:cumtable}
 \end{figure}
 
-\begin{figure}[H]\centering
-  % \includegraphics[width=\linewidth]{figs/cumtable_pseudocode.pdf}
-  \caption{Pseudocode for \texttt{buildCumulativeTable}: Step~1 single $O(N)$ scan, Step~2 X-sweep across month offsets, Step~3 Y-sweep from higher to lower area thresholds.}\label{fig:cumtable}
-\end{figure}
 
 \end{document}
