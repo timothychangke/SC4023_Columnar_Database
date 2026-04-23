@@ -928,58 +928,63 @@ int main(int argc, char* argv[]) {
     // Add new optimisation configs here. Each will be benchmarked and
     // compared against the first entry (baseline).
     // =====================================================================
-    std::vector<OptConfig> configs = {
-<<<<<<< HEAD
-        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     B3     C3     A9
-        { "Baseline",                                                                            false, false, false, false, false, false, false, false, false, false },
-        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false, false, false, false, false },
-        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false, false, false, false, false },
-        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false, false, false, false, false },
-        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false, false, false, false, false },
-        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false, false, false, false, false },
-        { "C4: Predicate Reorder",                                                               false, false, false, false, true,  false, false, false, false, false },
-        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true,  false, false, false, false, false },
-        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true,  false, false, false, false, false },
-        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true,  false, false, false, false, false },
-        { "B1: Zone Maps",                                                                       false, false, false, false, false, true,  false, false, false, false },
-        { "A1+B1: Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false, false, false },
-        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true, false, true,  true,  true,  true,  false, false, false, false },
+ std::vector<OptConfig> configs = {
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     A5     B3     C3     A9
+        { "Baseline",                                                                            false, false, false, false, false, false, false, false, false, false, false },
+        { "A1: Dict Encoding",                                                                   true,  false, false, false, false, false, false, false, false, false, false },
+        { "C1+C2: Result Reuse",                                                                 false, true,  false, false, false, false, false, false, false, false, false },
+        { "A1+C1+C2: Dict+Reuse",                                                                true,  true,  false, false, false, false, false, false, false, false, false },
+        { "A4: Precompute PPSM",                                                                 false, false, true,  false, false, false, false, false, false, false, false },
+        { "C6: Int Multiply",                                                                    false, false, false, true,  false, false, false, false, false, false, false },
+        { "C4: Predicate Reorder",                                                               false, false, false, false, true,  false, false, false, false, false, false },
+        { "A4+C6+C4: Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true,  false, false, false, false, false, false },
+        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true,  false, false, false, false, false, false },
+        { "A1+A4+C6+C4+C1C2: All",                                                               true,  true,  true,  true,  true,  false, false, false, false, false, false },
+        { "B1: Zone Maps",                                                                       false, false, false, false, false, true,  false, false, false, false, false },
+        { "A1+B1: Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false, false, false, false },
+        { "B1+A4+C6+C4: Zone Maps + Dict + Predicate Reorder + Int Multiply + Precomputed PPSM", true,  false, true,  true,  true,  true,  false, false, false, false, false },
 
-        { "B2: Bitmap Town Index",                                                               false, false, false, false, false, false, false, false, false, false, false, 50, true },
-        { "A1+B2: Dict + Bitmap Town",                                                           true,  false, false, false, false, false, false, false, false, false, false, 50, true },
-        { "A2+B2: Presort + Bitmap Town",                                                        false, false, false, false, false, false, true,  false, false, false, false, 50, true },
-        { "B1+B2: Zone Maps + Bitmap Town",                                                      false, false, false, false, false, true,  false, false, false, false, false, 50, true },
-        { "C3+B2: LateMat + Bitmap Town",                                                        false, false, false, false, false, false, false, false, true,  false, false, 50, true },
-        { "A1+A2+B1+C3+B2: Full Scan Stack + Bitmap",                                            true,  false, false, false, true,  true,  true,  false, true,  false, false, 50, true },
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     A5     B3     C3     A9     D1     $MB   B2
+        { "B2: Bitmap Town Index",                                                               false, false, false, false, false, false, false, false, false, false, false, false, 50, true },
+        { "A1+B2: Dict + Bitmap Town",                                                           true,  false, false, false, false, false, false, false, false, false, false, false, 50, true },
+        { "A2+B2: Presort + Bitmap Town",                                                        false, false, false, false, false, false, true,  false, false, false, false, false, 50, true },
+        { "B1+B2: Zone Maps + Bitmap Town",                                                      false, false, false, false, false, true,  false, false, false, false, false, false, 50, true },
+        { "C3+B2: LateMat + Bitmap Town",                                                        false, false, false, false, false, false, false, false, false, true,  false, false, 50, true },
+        { "A1+A2+B1+C3+B2: Full Scan Stack + Bitmap",                                            true,  false, false, false, true,  true,  true,  false, false, true,  false, false, 50, true },
 
-        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true,  false, false, false, true,  false, false, false, false },
-        { "C3: Late Materialise",                                                                false, false, false, false, false, false, false, false, true,  false },
-        { "A1+C3: Dict+LateMat",                                                                 true,  false, false, false, false, false, false, false, true,  false },
-        { "A1+C3+C4: Dict+LateMat+PredReorder",                                                  true,  false, false, false, true,  false, false, false, true,  false },
-        { "A1+A4+C3+C4+C6: All Scan Opts",                                                       true,  false, true,  true,  true,  false, false, false, true,  false },
-        { "A1+A4+C3+C4+C6+B1: All Scan+ZoneMaps",                                                true,  false, true,  true,  true,  true,  false, false, true,  false },
+        { "C1+C2+B1: Reuse + ZoneMaps",                                                          false, true,  false, false, false, true,  false, false, false, false, false },
+        { "C3: Late Materialise",                                                                false, false, false, false, false, false, false, false, false, true,  false },
+        { "A1+C3: Dict+LateMat",                                                                 true,  false, false, false, false, false, false, false, false, true,  false },
+        { "A1+C3+C4: Dict+LateMat+PredReorder",                                                  true,  false, false, false, true,  false, false, false, false, true,  false },
+        { "A1+A4+C3+C4+C6: All Scan Opts",                                                       true,  false, true,  true,  true,  false, false, false, false, true,  false },
+        { "A1+A4+C3+C4+C6+B1: All Scan+ZoneMaps",                                                true,  false, true,  true,  true,  true,  false, false, false, true,  false },
 
         { "A2: Pre-sorted Storage",                                                              false, false, false, false, false, false, true,  false, false, false, false },
-        { "B3 only: Month Binary Search (fallback without A2)",                                 false, false, false, false, false, false, false, false, true,  false, false },
+        { "B3 only: Month Binary Search (fallback without A2)",                                  false, false, false, false, false, false, false, false, true,  false, false },
         { "A2+B3: Pre-sorted + Month Binary Search",                                             false, false, false, false, false, false, true,  false, true,  false, false },
-        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                  true,  false, false, false, false, false, true,  false, true,  false, false },
+        { "A1+A2+B3: Dict + Pre-sorted + Month Binary Search",                                   true,  false, false, false, false, false, true,  false, true,  false, false },
 
-        { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true,  50, false },
-        { "D1: Chunked I/O 10MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, true,  true,  10, false },
-        { "D1: Chunked I/O 5MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true,  5, false },
-        { "D1: Chunked I/O 2MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true,  2, false },
-        { "D1: Chunked I/O 1MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, true,  true,  1, false },
-        { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, true,  true,  true,  50, false },
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     A5     B3     C3     A9     D1     $MB
+        { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, false, true,  true,  50 },
+        { "D1: Chunked I/O 10MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, false, true,  true,  10 },
+        { "D1: Chunked I/O 5MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, false, true,  true,  5  },
+        { "D1: Chunked I/O 2MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, false, true,  true,  2  },
+        { "D1: Chunked I/O 1MB",                                                                 true,  false, true,  true,  true,  true,  false, false, false, false, true,  true,  1  },
+        { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, false, true,  true,  true,  50 },
 
-        { "D2: mmap (A9+mmap)",                                                                  true,  false, true,  true,  true,  true,  false, false, false, true,  false, 50,    true },
-        { "D2+All: mmap+everything",                                                             true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50,    true },
-        { "D2+C1C2: mmap+reuse",                                                                 true,  true,  true,  true,  true,  true,  false, false, false, true,  false, 50, false, true },
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     A5     B3     C3     A9     D1     $MB   B2     D2
+        { "D2: mmap (A9+mmap)",                                                                  true,  false, true,  true,  true,  true,  false, false, false, false, true,  false, 50,   false, true },
+        { "D2+All: mmap+everything",                                                             true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50,   false, true },
+        { "D2+C1C2: mmap+reuse",                                                                 true,  true,  true,  true,  true,  true,  false, false, false, false, true,  false, 50,   false, true },
 
-        { "E1: Town Partitioning",                                                               true,  false, false, false, false, false, true,  false, false, true,  false, 50, false, false, true },
-        { "E1+A1+A2: Partitioned+Dict+Presort",                                                 true,  false, false, false, false, false, true,  false, false, true,  false, 50, false, false, true },
-        { "E1+B1: Partitioned+ZoneMaps",                                                         true,  false, true,  true,  true,  true,  true,  false, false, true,  false, 50, false, false, true },
-        { "E1+C1C2: Partitioned+Reuse",                                                          true,  true,  false, false, false, false, true,  false, false, true,  false, 50, false, false, true },
-        { "E1+All: Partitioned+Everything",                                                      true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50, false, false, true },
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     A5     B3     C3     A9     D1     $MB   B2     D2     E1
+        { "E1: Town Partitioning",                                                               true,  false, false, false, false, false, true,  false, false, false, true,  false, 50,   false, false, true },
+        { "E1+A1+A2: Partitioned+Dict+Presort",                                                  true,  false, false, false, false, false, true,  false, false, false, true,  false, 50,   false, false, true },
+        { "E1+B1: Partitioned+ZoneMaps",                                                         true,  false, true,  true,  true,  true,  true,  false, false, false, true,  false, 50,   false, false, true },
+        { "E1+C1C2: Partitioned+Reuse",                                                          true,  true,  false, false, false, false, true,  false, false, false, true,  false, 50,   false, false, true },
+        { "E1+All: Partitioned+Everything",                                                      true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  true,  false, 50,   false, false, true },
+
+        //                                                                                        A1     C1/C2  A4     C6     C4     B1     A2     A5     B3     C3     A9
         { "A5: RLE Town",                                                                        false, false, false, false, false, false, false, true,  false, false, false },
         { "A2+A5: Presort + RLE Town",                                                           false, false, false, false, false, false, true,  true,  false, false, false },
         { "A1+A2+A5: Dict + Presort + RLE Town",                                                 true,  false, false, false, false, false, true,  true,  false, false, false },
@@ -992,8 +997,8 @@ int main(int argc, char* argv[]) {
         { "A9+A2+B3: ColFile+Presort+MonthBSearch",                                              false, false, false, false, false, false, true,  false, true,  false, true  },
         { "A9+A2+A5+B3: ColFile+Presort+RLE+MonthBSearch",                                       false, false, false, false, false, false, true,  true,  true,  false, true  },
 
-        { "D1: Chunked I/O 50MB",                                                                true,  false, true,  true,  true,  true,  false, false, false, false, true,  /*chunked_io=*/true, /*budget_mb=*/50 },
-        { "D1+C3: Chunked + Late Mat",                                                           true,  false, true,  true,  true,  true,  false, false, false, true,  true,  true, 50 },
+        { "D1: Chunked I/O 50MB (A9)",                                                           true,  false, true,  true,  true,  true,  false, false, false, false, true,  true, 50 },
+        { "D1+C3: Chunked + Late Mat (A9)",                                                      true,  false, true,  true,  true,  true,  false, false, false, true,  true,  true, 50 },
     };
 
     // =====================================================================
