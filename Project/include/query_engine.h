@@ -1,19 +1,4 @@
-/*
- * declares the query parameter extraction and the main query execution logic.
- *
- * what this does:
- * - parse the matric number to find target year, start month, and allowed towns
- * - run the x, y query directly against our ColumnStore
- *
- * Query spec recap:
- * for a given (x,y), find records where:
- * - YEAR == target_year
- * - MONTH is between start_month and start_month + x - 1
- * - Town is inside the allowed list
- * - Floor_Area >= y
- * then find the one with the lowest (Resale_Price / Floor_Area).
- * result is only valid if this minimum is <= 4725.
- */
+
 
 #pragma once
 
@@ -24,12 +9,7 @@
 
 // query result struct
 
-/*
- * QueryResult
- * struct just to hold the final output fields for printing.
- * NOTE: dont use this to store data during the scan. we are building a
- * column store, so all computations must run directly on the vectors.
- */
+
 struct QueryResult {
     int      x            = 0;
     int      y            = 0;
@@ -42,78 +22,25 @@ struct QueryResult {
     uint16_t lease_commence_date = 0;
     double   price_per_sqm       = 0.0; // Resale_Price / Floor_Area
     bool     no_result           = false; // true if nothing matches or min > 4725
-    // D1: global row index of the winning row within the *chunk* being
-    // scanned. Populated by runQuery and read by runAllQueriesChunked to
-    // translate chunk-local winners back to global row indices.
-    // Unused (and zero) on all non-D1 paths.
     std::size_t local_idx = 0;
 };
 
 // helpers to get query params
 
-/*
- * buildTownList
- * get the list of towns based on the digits in the matric number.
- * uses table 1 from the project spec. duplicate digits just map to same town once.
- *
- * 0=BEDOK, 1=BUKIT PANJANG, 2=CLEMENTI, 3=CHOA CHU KANG, 4=HOUGANG
- * 5=JURONG WEST, 6=PASIR RIS, 7=TAMPINES, 8=WOODLANDS, 9=YISHUN
- *
- * @param matric_number full matric string eg "A1234567B"
- * @return vector of unique uppercase town strings
- */
+
 std::vector<std::string> buildTownList(const std::string& matric_number);
 
-/*
- * buildTownBitmapMask
- * Build a combined town mask once for a fixed town list.
- * The mask is sized to db.size() and can be reused across all 568 queries
- * for the same matriculation number.
- */
+
 std::vector<uint8_t> buildTownBitmapMask(const ColumnStore& db,
                                          const std::vector<std::string>& towns);
 
-/*
- * deriveQueryParams
- * extract base year and start month from matric number:
- * - target year: based on the LAST digit of the matric
- * - start month: based on the SECOND LAST digit (0 becomes Oct = 10)
- *
- * Year mapping (last digit to year, spec says 2025 excluded):
- * 0=2020, 1=2021, 2=2022, 3=2023, 4=2024
- * 5=2015, 6=2016, 7=2017, 8=2018, 9=2019
- *
- * @param matric_number full matric string
- * @param target_year outputs the 4 digit year
- * @param start_month outputs month 1 to 12
- * @throws std::invalid_argument if matric string got less than 2 digits
- */
+
 void deriveQueryParams(const std::string& matric_number,
                        uint16_t& target_year, uint8_t& start_month);
 
 // core execution
 
-/*
- * runQuery
- * run the actual (x,y) query by scanning the ColumnStore.
- *
- * applies 4 filters column by column:
- * 1. col_month_year == target_year
- * 2. col_month_month in [start_month, start_month + x - 1] (capped at 12)
- * 3. col_town is in the towns list
- * 4. col_floor_area >= y
- *
- * out of all records that pass, find the one with lowest Resale_Price/Floor_Area.
- * only record it if this minimum is <= 4725.
- *
- * @param db the populated ColumnStore
- * @param x query duration in months (1 to 8)
- * @param y min floor area (80 to 150)
- * @param target_year year to filter
- * @param start_month start of month range
- * @param towns allowed towns
- * @param result output struct to populate
- */
+
 void runQuery(const ColumnStore&              db,
               int                             x,
               int                             y,
@@ -123,21 +50,7 @@ void runQuery(const ColumnStore&              db,
               QueryResult&                    result,
               const std::vector<uint8_t>*     precomputed_town_mask = nullptr);
 
-/*
- * buildCumulativeTable
- * Preprocessing step for intermediate result optimisation.
- * Previously, all rows of the table were scanned for each (x,y) query.
- * - A x=3 month window contains records from x=2 and x=1.
- *   Instead of scanning for x=1, x=2, x=3 separately, we scan once and
- *   label each record with which month offset it belongs to (1..8).
- * - A y=80 floor area threshold contains records satisfying y=81, y=82, ...
- *   We group records by their exact area bucket (80..150) once.
- * Then we build a cumulative table cum_x in two sweeps:
- * - X sweep (offsets 1->8): cum_x[x][area] = min PPSM over offsets 1..x
- * - Y sweep (area 149->80): propagate min downward so that
- *   cum_x[x][y] = min PPSM for any record with month_offset <= x AND floor_area >= y.
- * Result: O(N) table build, O(1) lookup for any (x,y) pair.
- */
+
 std::vector<std::vector<MinEntry>> buildCumulativeTable(
     const ColumnStore&              db,
     uint16_t                        target_year,
@@ -145,21 +58,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
     const std::vector<std::string>& towns
 );
 
-/*
- * runAllQueriesChunked
- * D1 batch runner: scans the table one I/O chunk at a time and folds
- * the per-chunk best PPSM into a running global minimum for every (x,y)
- * pair in [1..8] x [80..150]. This reverses the normal loop nesting
- * (chunks outer, queries inner) so each chunk is read from disk exactly
- * once per full benchmark run instead of once per query.
- *
- * Populates `results` with 568 QueryResult entries in the same layout
- * the eval suite expects: index (x-1)*71 + (y-80).
- *
- * Requires: base_db.use_columnar_files && base_db.use_dict_encoding.
- * The chunk size is read from base_db.io_chunk_rows (caller is expected
- * to have called computeIOChunkRows first, or the apply() helper does it).
- */
+
 void runAllQueriesChunked(const ColumnStore&              base_db,
                           uint16_t                        target_year,
                           uint8_t                         start_month,

@@ -1,6 +1,4 @@
-/*
- * implementation for the csv writer 
- */
+
 
 #include "output_writer.h"
 
@@ -28,10 +26,6 @@ void writeResults(const std::vector<QueryResult>& results,
     for (const auto& r : results) {
         if (r.no_result) continue; // skip those (x,y) with no result
 
-        // pad month to 2 digits (e.g. 6 becomes "06").
-        // buffer size 4 is for 2 digits + null terminator + 1 extra byte
-        // just to satisfy the compiler format truncation warning. 
-        // month is always 1-12 anyway so only 3 bytes actually used.
         char month_buf[4];
         std::snprintf(month_buf, sizeof(month_buf), "%02d",
                       static_cast<int>(r.month));

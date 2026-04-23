@@ -1,22 +1,4 @@
-/*
- * implementation for the parameter extraction and columnar scan.
- *
- * === ARCHITECTURE: Composable Optimisation Flags ===
- * runQuery has two paths:
- *
- * 1. REUSE PATH (use_reuse) — O(1) cumulative table lookup, early return.
- *
- * 2. SCAN PATH — single unified loop where each flag controls one decision:
- *      use_zone_maps        (B1) — outer chunk iteration: skip entire chunks
- *      use_dict_encoding    (A1) — town comparison: int==int vs string==string
- *      use_predicate_reorder(C4) — predicate order: Town-first vs Year-first
- *      use_int_multiply     (C6) — integer early-exit gate before PPSM calc
- *      use_precomputed_ppsm (A4) — PPSM source: pre-stored vs on-the-fly
- *      use_late_materialise (C3) — defer price column to Phase 2 survivors loop
- *
- * Any combination of scan-path flags just works. The reuse path is the only
- * one that short-circuits since it bypasses the scan altogether.
- */
+
 
 #include "query_engine.h"
 
@@ -110,9 +92,6 @@ std::size_t upperBoundMonthKey(const ColumnStore& db,
 }
 } // namespace
 
-// ============================================================================
-// Helper functions (unchanged)
-// ============================================================================
 
 std::vector<std::string> buildTownList(const std::string& matric_number) {
     static const std::string TOWN_MAP[10] = {
@@ -183,9 +162,6 @@ void deriveQueryParams(const std::string& matric_number,
                       : static_cast<uint8_t>(second_last_digit);
 }
 
-// ============================================================================
-// Core query execution — unified scan loop
-// ============================================================================
 
 void runQuery(const ColumnStore&              db,
               int                             x,
@@ -209,7 +185,7 @@ void runQuery(const ColumnStore&              db,
 
     const std::size_t N = db.size();
 
-    // --- B2 setup: reuse a precomputed town mask when available ---
+    // Bitmap setup: reuse a precomputed town mask when available ---
     std::vector<uint8_t> local_town_mask;
     const std::vector<uint8_t>* town_mask_ptr = precomputed_town_mask;
     bool use_bitmap_path = db.use_bitmap_index_town &&
@@ -227,12 +203,6 @@ void runQuery(const ColumnStore&              db,
         db.rows_scanned_after_rle = 0;
     }
 
-    // =================================================================
-    // REUSE PATH — O(1) table lookup, bypasses scan entirely
-    // This is the only path that short-circuits. If reuse is on and the
-    // cumulative table is built, we just read the answer. All other flags
-    // are irrelevant since there is no scan loop to optimise.
-    // =================================================================
     if (db.use_reuse && !db.cum_table.empty()) {
         const MinEntry &e = db.cum_table[x][y];
         if (!e.has) return;
@@ -270,12 +240,6 @@ void runQuery(const ColumnStore&              db,
         return;
     }
 
-    // =================================================================
-    // A5 FAST PATH (RLE Town)
-    // Iterate only matching town runs; avoid row-level town comparisons.
-    // If A2+B3 are available, month range narrowing is done by binary search
-    // within each selected run.
-    // =================================================================
     if (db.use_rle_town && !db.town_run_start.empty()) {
         std::vector<uint32_t> selected_runs;
         selected_runs.reserve(towns.size());
@@ -387,11 +351,6 @@ void runQuery(const ColumnStore&              db,
         return;
     }
 
-    // =================================================================
-    // A2 + B3 FAST PATH 
-    // 1) A2 stores rows in sorted order: Town -> Year -> Month.
-    // 2) B3 uses binary search to jump directly to the month range we want.
-    // =================================================================
     if (db.use_presorted_storage && db.use_month_binary_search) {
         const uint32_t start_key = monthKey(target_year, start_month);
         const uint32_t end_key   = monthKey(target_year, end_month);
@@ -400,7 +359,7 @@ void runQuery(const ColumnStore&              db,
             TownPartition part;
             bool has_part = false;
 
-            // A1 Optimisation: if dict encoding is on, compare town IDs (int==int) instead of full strings
+            //Dict Encoding Optimisation: if dict encoding is on, compare town IDs (int==int) instead of full strings
             if (db.use_dict_encoding) {
                 uint16_t tid = 0;
                 if (db.dict_town.lookup(town, tid) &&
@@ -420,10 +379,6 @@ void runQuery(const ColumnStore&              db,
 
             if (!has_part) continue;
 
-            // Binary search inside this town partition:
-            // lb = first row with monthKey >= start_key
-            // ub = first row with monthKey >  end_key
-            // Candidate rows are [lb, ub).
             const std::size_t lb = lowerBoundMonthKey(db, part.begin, part.end, start_key);
             const std::size_t ub = upperBoundMonthKey(db, lb, part.end, end_key);
 
@@ -488,20 +443,8 @@ void runQuery(const ColumnStore&              db,
         return;
     }
 
-    // =================================================================
-    // SCAN PATH — single unified loop, ALL flags compose inside
-    //
-    // Flag roles (each controls one isolated decision):
-    //   use_zone_maps        (B1) — outer iteration: skip entire chunks
-    //   use_dict_encoding    (A1) — town comparison: int==int vs string==string
-    //   use_predicate_reorder(C4) — predicate order: Town-first vs Year-first
-    //   use_int_multiply     (C6) — integer early-exit gate before PPSM calc
-    //   use_precomputed_ppsm (A4) — PPSM source: pre-stored vs divide
-    //
-    // Any combination of flags just works.
-    // =================================================================
 
-    // --- A1 setup: pre-resolve town IDs once (outside the loop) ---
+    // Dict Encoding setup: pre-resolve town IDs once (outside the loop) ---
     std::vector<uint16_t> town_ids;
     if (db.use_dict_encoding && !use_bitmap_path && !db.use_town_partitioning) {
         town_ids.reserve(towns.size());
@@ -514,9 +457,6 @@ void runQuery(const ColumnStore&              db,
         if (town_ids.empty()) return;
     }
 
-    // --- B1 setup: chunk iteration bounds ---
-    // When zone maps are OFF:  1 chunk covering [0, N) — same as a flat loop
-    // When zone maps are ON:   ceil(N/CHUNK_SIZE) chunks, each pruned by min/max
     const std::size_t num_chunks = db.use_zone_maps
         ? db.zm_floor_area.numChunks()
         : 1;
@@ -526,7 +466,7 @@ void runQuery(const ColumnStore&              db,
     const uint32_t end_month_32   = static_cast<uint32_t>(end_month);
     const uint32_t y_threshold    = static_cast<uint32_t>(y);
 
-    // --- C3 setup: late materialisation survivor list ---
+    // Late Mat setup: late materialisation survivor list ---
     std::vector<size_t> survivors;
     if (db.use_late_materialise) {
         survivors.reserve(N / 20);
@@ -558,10 +498,6 @@ void runQuery(const ColumnStore&              db,
         // =================== INNER LOOP: rows =======================
         for (std::size_t i = row_start; i < row_end; ++i) {
 
-            // ---- PREDICATE BLOCK ----
-            // C4 controls the ORDER of predicates.
-            // A1 controls HOW the town predicate is evaluated.
-            // These two are orthogonal — every combination works.
 
             if (use_bitmap_path) {
                 ++db.town_bitmap_evaluations;
@@ -572,7 +508,7 @@ void runQuery(const ColumnStore&              db,
             }
 
             if (db.use_predicate_reorder) {
-                // --- C4 ON: Town FIRST (eliminates ~80% of rows) ---
+                // Predicate Reordering ON: Town FIRST (eliminates ~80% of rows) ---
                 if (!use_bitmap_path && !db.use_town_partitioning) {
                     if (db.use_dict_encoding) {
                         bool match = false;
@@ -596,13 +532,13 @@ void runQuery(const ColumnStore&              db,
                 if (m < start_month || m > end_month) continue;
 
             } else {
-                // --- C4 OFF: baseline order — Year → Month → Town ---
+                // Predicate Reordering OFF: baseline order — Year → Month → Town ---
                 if (db.col_month_year[i] != target_year) continue;
 
                 const uint8_t m = db.col_month_month[i];
                 if (m < start_month || m > end_month) continue;
 
-                // town match (A1 controls int vs string)
+                // town match 
                 // E1: skip when town_partitioning is on — data is pre-filtered
                 if (!use_bitmap_path && !db.use_town_partitioning) {
                     if (db.use_dict_encoding) {
@@ -652,11 +588,6 @@ void runQuery(const ColumnStore&              db,
         } // end inner loop (rows)
     } // end outer loop (chunks)
 
-    // =================================================================
-    // C3 PHASE 2: fetch price column only for survivors
-    // C6 and A4 compose here — they only touch col_resale_price and
-    // col_floor_area, which are exactly the columns being deferred.
-    // =================================================================
     if (db.use_late_materialise) {
         for (const size_t idx : survivors) {
             // C6: integer gate on survivors
@@ -681,9 +612,6 @@ void runQuery(const ColumnStore&              db,
         }
     }
 
-    // =================================================================
-    // POST-SCAN VALIDATION (unchanged, shared by all scan configs)
-    // =================================================================
     if (result.no_result) return;
     if (min_ppsm > 4725.0) {
         result.no_result = true;
@@ -716,16 +644,6 @@ void runQuery(const ColumnStore&              db,
     }
 }
 
-// ============================================================================
-// Preprocessing step for intermediate result reuse (C1 + C2)
-// ============================================================================
-// This function also benefits from A1 (dict encoding) for the town filter.
-// A4 and C6 are not applied here because the cumulative table build needs
-// exact PPSM values for every qualifying record, and the C6 gate would
-// incorrectly discard records whose PPSM exceeds 4725 individually but
-// contribute to a valid cumulative minimum at a different (x,y).
-// Actually — records above 4725 can never produce a valid result, so C6
-// could be used. But the table build is O(N) once, so the gain is negligible.
 
 std::vector<std::vector<MinEntry>> buildCumulativeTable(
                 const ColumnStore&              db,
@@ -764,7 +682,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         int offset = static_cast<int>(month) - static_cast<int>(start_month) + 1;
         if (offset < 1 || offset > 8) continue;
 
-        // filter 3: town match (A1 controls int vs string)
+        // filter 3: town match 
         if (db.use_dict_encoding) {
             bool match = false;
             const uint16_t row_id = db.col_town_encoded[i];
@@ -796,7 +714,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         }
     }
 
-    // C1 sweep: cum_x[x][area] = min PPSM over offsets 1..x for exact area bucket
+    // Reuse sweep: cum_x[x][area] = min PPSM over offsets 1..x for exact area bucket
     std::vector<std::vector<MinEntry>> cum_x(9, std::vector<MinEntry>(151));
     for (int area = 80; area <= 150; ++area) {
         MinEntry running;
@@ -809,7 +727,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         }
     }
 
-    // C2 sweep: propagate min from high area down so cum_x[x][y] covers >= y
+    // Reuse sweep: propagate min from high area down so cum_x[x][y] covers >= y
     for (int off = 1; off <= 8; ++off) {
         for (int area = 149; area >= 80; --area) {
             const MinEntry &hi = cum_x[off][area + 1];
@@ -823,22 +741,6 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
     return cum_x;
 }
 
-// ============================================================================
-// D1: Chunked I/O batch runner
-// ============================================================================
-//
-// Reverses the normal loop nesting: instead of
-//   for each (x,y): for each chunk: scan
-// we do
-//   for each chunk: for each (x,y): scan that chunk and fold min
-//
-// This ensures each chunk is read from disk exactly ONCE per benchmark run,
-// not 568 times. Correctness relies on min being associative: the global
-// minimum is the minimum of the per-chunk minima.
-//
-// Requires: use_columnar_files && use_dict_encoding.
-// Incompatible with: use_reuse (caller must guard).
-// ============================================================================
 
 void runAllQueriesChunked(const ColumnStore&              base_db,
                           uint16_t                        target_year,
@@ -963,9 +865,6 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
                     min_ppsm[slot]        = chunk_result.price_per_sqm;
                     best_global_idx[slot] = chunk_start + chunk_result.local_idx;
 
-                    // Copy filter-side fields (year/month/floor_area/ppsm).
-                    // Display fields (town/block/...) are deferred to the
-                    // materialisation pass below.
                     results[slot].year         = chunk_result.year;
                     results[slot].month        = chunk_result.month;
                     results[slot].floor_area   = chunk_result.floor_area;

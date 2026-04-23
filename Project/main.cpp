@@ -1,27 +1,3 @@
-/*
- * main entry point for the SC4023 big data project.
- * this file is intentionally kept thin. it just orchestrates the main flow:
- * 1. parse the matriculation number from cmd args
- * 2. figure out the query params from it
- * 3. ingest ResalePricesSingapore.csv into our column store
- * 4. run all the (x, y) queries and write to csv
- *
- * Usage:
- * ./column_store <MatriculationNumber> [--dict-encoding] [--reuse]
- * eg ./column_store U1234567A
- * eg ./column_store U1234567A --dict-encoding
- * eg ./column_store U1234567A --reuse
- *
- *
- * Optimisation flags:
- * --dict-encoding   Enable dictionary encoding (A1) for string columns.
- *                   Replaces string comparisons with int comparisons during queries.
- * --presort-storage Enable pre-sorted storage (A2): sort by Town->Year->Month.
- * --month-bsearch   Enable month binary search index (B3).
- *                   Most effective when used with --presort-storage.
- * --reuse           Enables intermediate result reuse (C1 and C2).
- *                   Prevent rescanning full tables for different (x, y) when possible.
- */
 
 #include <cstring>
 #include <iostream>
@@ -137,19 +113,19 @@ int main(int argc, char* argv[]) {
           << (enable_zone_maps ? "ON" : "OFF") << "\n";
         std::cout << "  Bitmap Index (Town): "
             << (enable_bitmap_index_town ? "ON" : "OFF") << "\n";
-        std::cout << "  Pre-sorted Storage (A2):       "
+        std::cout << "  Pre-sorted Storage:       "
             << (enable_presorted_storage ? "ON" : "OFF") << "\n";
-        std::cout << "  Month Binary Search (B3):      "
+        std::cout << "  Month Binary Search:      "
             << (enable_month_bsearch ? "ON" : "OFF") << "\n";
-            std::cout << "  RLE Town (A5):                 "
+            std::cout << "  RLE Town:                 "
                   << (enable_rle_town ? "ON" : "OFF") << "\n";
     std::cout << "  Late Materialisation:            "
               << (enable_late_materialise ? "ON" : "OFF") << "\n";
     std::cout << "  Columnar Files:              "
           << (enable_columnar_files ? "ON" : "OFF") << "\n";
-    std::cout << "  Memory-Mapped I/O (D2):      "
+    std::cout << "  Memory-Mapped I/O:      "
           << (enable_mmap_io ? "ON" : "OFF") << "\n";
-    std::cout << "  Town Partitioning (E1):      "
+    std::cout << "  Town Partitioning:      "
           << (enable_town_partitioning ? "ON" : "OFF") << "\n";
     std::cout << "--------------------------\n";
     
@@ -220,20 +196,19 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        // D2 validation: mmap requires columnar files, conflicts with chunked I/O
+        // mmap requires columnar files, conflicts with chunked I/O
         if (db.use_mmap_io && !db.use_columnar_files) {
-            std::cout << "  [D2] WARNING: mmap_io requires columnar_files — disabling D2.\n";
+            std::cout << "  WARNING: mmap_io requires columnar_files — disabling D2.\n";
             db.use_mmap_io = false;
         }
         if (db.use_mmap_io && db.use_chunked_io) {
-            std::cout << "  [D2] WARNING: mmap_io conflicts with chunked_io (D1) — disabling D2.\n";
+            std::cout << "  WARNING: mmap_io conflicts with chunked_io — disabling D2.\n";
             db.use_mmap_io = false;
         }
 
         if (db.use_town_partitioning) {
-            // E1 validation
             if (!db.use_columnar_files) {
-                std::cout << "  [E1] NOTE: town_partitioning implies columnar_files, enabling.\n";
+                std::cout << "  NOTE: town_partitioning implies columnar_files, enabling.\n";
                 db.use_columnar_files = true;
             }
             loadColumnFilesPartitioned("data/columns_e1", towns, db);
@@ -241,7 +216,7 @@ int main(int argc, char* argv[]) {
             loadColumnFilesMmap(db.column_dir, db);
         } else if (db.use_columnar_files) {
             loadColumnFiles(db.column_dir, db);
-        } // <--- ADDED THIS BRACE
+        } 
         else {
             loadCSV("../data/ResalePricesSingapore.csv", db);
         }
