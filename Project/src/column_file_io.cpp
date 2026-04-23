@@ -10,11 +10,16 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstring>
+
+#ifdef _WIN32
+// Windows fallback path uses ifstream-based loaders.
+#else
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <cstring>
+#endif
 
 void writeDictionary(std::ofstream& f, const DictionaryEncoder& dict) {
     const uint32_t num_entries = static_cast<uint32_t>(dict.id_to_str.size());
@@ -544,6 +549,7 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
 }
 
 
+#ifndef _WIN32
 // Helper: mmap a file and register the region in db.mmap_regions for cleanup.
 // Returns pointer to the mapped data (past the uint32_t row-count header).
 static void* mmapColumnFile(const std::string& filepath,
@@ -772,6 +778,25 @@ uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
     ::close(fd);
     return value;
 }
+
+#else
+
+void loadColumnFilesMmap(const std::string& dir, ColumnStore& db) {
+    // Windows fallback: use standard file loading path.
+    loadColumnFiles(dir, db);
+}
+
+std::string loadStringAtMmap(const std::string& filepath, std::size_t idx) {
+    // Windows fallback: use standard lazy materialisation path.
+    return loadStringAt(filepath, idx);
+}
+
+uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
+    // Windows fallback: use standard lazy materialisation path.
+    return loadUint16At(filepath, idx);
+}
+
+#endif
 
 
 void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_dir) {
