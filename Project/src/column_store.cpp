@@ -6,6 +6,11 @@
 
 #include <iostream>
 
+#ifndef _WIN32
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 void ColumnStore::buildTownRLE() {
     town_run_value.clear();
     town_run_value_encoded.clear();
