@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [flags...]\n"
         << "Flags: --dict-encoding --bitmap-index-town --presort-storage --month-bsearch --reuse\n"
         << "Flags: --dict-encoding --presort-storage --month-bsearch --rle-town --reuse\n"
-        << "       --precompute-ppsm --int-multiply --predicate-reorder --zone-maps --late-materialise\n";
+        << "       --precompute-ppsm --int-multiply --predicate-reorder --zone-maps --late-materialise\n"
         << "       --mmap-io --town-partitioning --write-columns-partitioned\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
         std::cerr << "Example: " << argv[0] << " A5656567B --dict-encoding\n";
@@ -105,6 +105,7 @@ int main(int argc, char* argv[]) {
         }
         if (std::strcmp(argv[i], "--mmap-io") == 0) {
             enable_mmap_io = true;
+        }
         if (std::strcmp(argv[i], "--rle-town") == 0 ||
             std::strcmp(argv[i], "--rle") == 0) {
             enable_rle_town = true;
@@ -229,19 +230,19 @@ int main(int argc, char* argv[]) {
             db.use_mmap_io = false;
         }
 
-        try {
-            if (db.use_town_partitioning) {
-                // E1 validation
-                if (!db.use_columnar_files) {
-                    std::cout << "  [E1] NOTE: town_partitioning implies columnar_files, enabling.\n";
-                    db.use_columnar_files = true;
-                }
-                loadColumnFilesPartitioned("data/columns_e1", towns, db);
-            } else if (db.use_columnar_files && db.use_mmap_io) {
-                loadColumnFilesMmap(db.column_dir, db);
-            } else if (db.use_columnar_files) {
-                loadColumnFiles(db.column_dir, db);
-        } else {
+        if (db.use_town_partitioning) {
+            // E1 validation
+            if (!db.use_columnar_files) {
+                std::cout << "  [E1] NOTE: town_partitioning implies columnar_files, enabling.\n";
+                db.use_columnar_files = true;
+            }
+            loadColumnFilesPartitioned("data/columns_e1", towns, db);
+        } else if (db.use_columnar_files && db.use_mmap_io) {
+            loadColumnFilesMmap(db.column_dir, db);
+        } else if (db.use_columnar_files) {
+            loadColumnFiles(db.column_dir, db);
+        } // <--- ADDED THIS BRACE
+        else {
             loadCSV("../data/ResalePricesSingapore.csv", db);
         }
     } catch (const std::runtime_error& e) {
