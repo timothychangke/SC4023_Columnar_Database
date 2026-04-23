@@ -61,9 +61,9 @@ namespace perf {
     uint64_t queries_valid    = 0;  // (x,y) pairs with a valid result
     uint64_t chunks_total     = 0;  // total chunks evaluated 
     uint64_t chunks_skipped   = 0;  // chunks skipped by zone map pruning 
-    uint64_t runs_scanned     = 0;  // A5: total town runs traversed
-    uint64_t rows_skipped_by_rle = 0;      // A5: rows avoided by run pruning
-    uint64_t rows_scanned_after_rle = 0;   // A5: rows actually scanned after pruning
+    uint64_t runs_scanned     = 0;  // total town runs traversed
+    uint64_t rows_skipped_by_rle = 0;      // rows avoided by run pruning
+    uint64_t rows_scanned_after_rle = 0;   // rows actually scanned after pruning
 
     void reset() {
         rows_scanned = 0;
@@ -81,22 +81,22 @@ namespace perf {
 }
 struct OptConfig {
     std::string name;           // display name for the table
-    bool dict_encoding;         // A1
-    bool reuse;                 // C1+C2
-    bool precompute_ppsm;       // A4
-    bool int_multiply;          // C6
-    bool predicate_reorder;     // C4
-    bool zone_maps;             // B1
-    bool presorted_storage;     // A2
-    bool rle_town;              // A5
-    bool month_binary_search;   // B3
-    bool late_materialise;      // C3
-    bool columnar_files;        // A9
-    bool        chunked_io      = false;  // D1
-    std::size_t memory_budget_mb = 50;    // D1
-    bool bitmap_index_town = false; // B2
-    bool        mmap_io         = false;  // D2
-    bool        town_partitioning = false; // E1
+    bool dict_encoding;         
+    bool reuse;                 
+    bool precompute_ppsm;       
+    bool int_multiply;          
+    bool predicate_reorder;     
+    bool zone_maps;             
+    bool presorted_storage;     
+    bool rle_town;              
+    bool month_binary_search;   
+    bool late_materialise;      
+    bool columnar_files;        
+    bool        chunked_io      = false;  
+    std::size_t memory_budget_mb = 50;    
+    bool bitmap_index_town = false; 
+    bool        mmap_io         = false;  
+    bool        town_partitioning = false; 
 
     // apply this config to a ColumnStore before loading
     void apply(ColumnStore& db) const {
@@ -270,7 +270,7 @@ static void runQueryInstrumented(
         return;
     }
 
-    // --- B1: count zone map chunk stats ---
+    // count zone map chunk stats 
     if (db.use_zone_maps) {
         const uint8_t end_month_zm = static_cast<uint8_t>(
             std::min(static_cast<int>(start_month) + x - 1, 12));
@@ -302,7 +302,7 @@ static void runQueryInstrumented(
     uint64_t local_town_cmp = 0;
     uint64_t local_passed = 0;
 
-    // E1: when town_partitioning is on, the loaded data is already
+    // when town_partitioning is on, the loaded data is already
     // pre-filtered — no town comparisons happen in the scan path.
     const bool e1_skip_town = db.use_town_partitioning;
 
@@ -557,11 +557,10 @@ static BenchmarkResult runBenchmark(
     std::vector<uint8_t> town_bitmap_mask;
     const std::vector<uint8_t>* town_bitmap_mask_ptr = nullptr;
 
-    // --- LOAD PHASE (timed once) ---
     ColumnStore db;
     config.apply(db);
 
-    // A9: if columnar files requested, ensure they exist first (untimed)
+    // if columnar files requested, ensure they exist first (untimed)
     if (config.columnar_files) {
         // Use a config-specific directory so different flag combos don't clash
         std::string col_dir = "data/columns";
@@ -591,7 +590,7 @@ static BenchmarkResult runBenchmark(
         test_meta.close();
     }
 
-    // E1: if town partitioning requested, ensure partitioned files exist
+    // if town partitioning requested, ensure partitioned files exist
     std::string e1_dir;
     if (config.town_partitioning) {
         e1_dir = "data/columns_e1";
@@ -629,7 +628,7 @@ static BenchmarkResult runBenchmark(
     }
     auto t_load_end = std::chrono::high_resolution_clock::now();
 
-    // D1: precompute chunk size once the load path knows total_rows.
+    // precompute chunk size once the load path knows total_rows.
     if (config.chunked_io) {
         if (!config.columnar_files || !config.dict_encoding) {
             std::cout << "  WARNING: chunked_io requires columnar_files "
@@ -666,7 +665,7 @@ static BenchmarkResult runBenchmark(
         town_bitmap_mask_ptr = &town_bitmap_mask;
     }
 
-    // --- build cumulative table if reuse is enabled ---
+    // build cumulative table if reuse is enabled 
     if (config.reuse) {
         db.cum_table = buildCumulativeTable(db, target_year, start_month, towns);;
     }
@@ -677,7 +676,7 @@ static BenchmarkResult runBenchmark(
     bm.dict_flat_model_size = db.dict_flat_model.size();
     bm.dict_street_size    = db.dict_street_name.size();
 
-    // --- QUERY PHASE (timed, averaged over num_runs) ---
+    // QUERY PHASE (timed, averaged over num_runs) 
     std::vector<double> run_times;
     run_times.reserve(num_runs);
 
@@ -704,7 +703,7 @@ static BenchmarkResult runBenchmark(
         }
 
         if (db.use_chunked_io) {
-            // D1: batch runner. Pre-sizes `results` to exactly 568 entries
+            // batch runner. Pre-sizes `results` to exactly 568 entries
             // in slot order (x-1)*71 + (y-80).
             runAllQueriesChunked(db, target_year, start_month, towns, results);
             // perf counters aren't populated by the batch runner — skip them.
@@ -885,7 +884,7 @@ int main(int argc, char* argv[]) {
         { "Int Multiply",                                                                    false, false, false, true,  false, false, false, false, false, false, false },
         { "Predicate Reorder",                                                               false, false, false, false, true,  false, false, false, false, false, false },
         { "Precompute PPSM + Int Multiply + Predicate Reorder",                        false, false, true,  true,  true,  false, false, false, false, false, false },
-        { "A1+A4+C6+C4: Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true,  false, false, false, false, false, false },
+        { "Dict + Precompute PPSM + Int Multiply + Predicate Reorder",              true,  false, true,  true,  true,  false, false, false, false, false, false },
         { "Dict + Precompute PPSM + Int Multiply + Predicate Reorder + Reuse",                                                               true,  true,  true,  true,  true,  false, false, false, false, false, false },
         { "Zone Maps",                                                                       false, false, false, false, false, true,  false, false, false, false, false },
         { "Dict + ZoneMaps",                                                              true,  false, false, false, false, true,  false, false, false, false, false },

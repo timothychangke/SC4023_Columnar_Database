@@ -234,7 +234,7 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
             db.col_lease_commence_date.push_back(rec_lease);
             db.col_resale_price.push_back(rec_price);
 
-            // === A4: Pre-compute Price/SqM if enabled ===
+            // Pre-compute Price/SqM if enabled
             if (db.use_precomputed_ppsm) {
                 db.col_price_per_sqm.push_back(
                     static_cast<double>(rec_price) /
@@ -288,8 +288,7 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
                   << " StreetName=" << db.dict_street_name.size() << "\n";
     }
 
-    // === A2: Pre-sorted Storage (Town, then Year/Month) ===
-    // Important: apply ONE row permutation to ALL columns to preserve alignment.
+    // Pre-sorted Storage (Town, then Year/Month) 
     if (db.use_presorted_storage) {
         const std::size_t N = db.size();
         std::vector<std::size_t> perm(N);
@@ -388,7 +387,7 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
         std::cout << "  Town partitions built: " << db.town_partitions.size() << "\n";
     }
 
-    // === Town Run-Length Encoding ===
+    // Town Run-Length Encoding 
     // Build on FINAL in-memory order 
     if (db.use_rle_town) {
         if (!db.use_presorted_storage) {
