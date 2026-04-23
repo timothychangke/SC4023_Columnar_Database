@@ -307,12 +307,12 @@ Our parser detects column positions from the CSV header and streams rows into pa
 \texttt{YYYY-MM} date strings are split into \texttt{Year} (\texttt{uint16}) and \texttt{Month} (\texttt{uint8}).
 Invalid rows (malformed dates, empty fields, etc) are skipped.
 
-\subsection{Baseline Column Store}\label{sec:baseline-store}
+\subsection{Base Design of Column Store}\label{sec:baseline-store}
 
 The \texttt{ColumnStore} struct holds one \texttt{std::vector} per column.
 Numeric columns use fixed-width types as seen in Table~\ref{tab:layout}.
 All columns are populated in one pass through the CSV.
-For the baseline, loads of all 10 columns into memory produces a total footprint of 71.4\,MB.
+For the baseline, when we load all 10 columns into memory, it incurs a total of 71.4\,MB in memory.
 
 \subsection{Per-Column Physical Layout}\label{sec:layout}
 
@@ -323,10 +323,10 @@ Column & Type & Encoding & B/row & Derived? & Rationale \\
 \midrule
 Year              & uint16 & raw       & 2 & from \texttt{YYYY-MM} & range predicate \\
 Month             & uint8  & raw       & 1 & from \texttt{YYYY-MM} & range predicate \\
-Town              & uint8  & dict (A1) & 1 & no  & 26 towns $\le$ 5 bits \\
+Town              & uint16  & dict (A1) & 1 & no  & 26 towns $\le$ 5 bits \\
 Floor\_Area       & uint16 & raw       & 2 & no  & $\ge y$ predicate \\
 Resale\_Price     & uint32 & raw       & 4 & no  & aggregate target \\
-PricePerSqm (A4)  & float32& raw       & 4 & yes & removes per-row division \\
+PricePerSqm (A4)  & double & raw       & 4 & yes & removes per-row division \\
 Block, Flat\_Model, Lease\_Commence & \multicolumn{4}{l}{\dots\quad late-materialised (\S\ref{sec:c3})} & output only \\
 \bottomrule
 \end{tabular}
@@ -335,41 +335,37 @@ Block, Flat\_Model, Lease\_Commence & \multicolumn{4}{l}{\dots\quad late-materia
 
 \subsection{Encoding and Layout Decisions}\label{sec:layout-discussion}
 
-\paragraph{Dictionary encoding (A1).}
-Our \texttt{DictionaryEncoder} is a bidirectional \texttt{unordered\_map}/\texttt{vector} pair.
-It maps each of the unique 26 towns to a \texttt{uint16\_t} ID.
-During query, our engine would first resolve the target town list to IDs once outside the scan and then use integer equality in the inner loop.
+\paragraph{Dictionary Encoding.}
+Our \texttt{DictionaryEncoder} is a bidirectional \texttt{unordered\_map}/\texttt{vector} pair that maps each of the unique 26 towns to a \texttt{uint16\_t} ID.
+During queries, our engine would first resolve the target town list to IDs once outside the scan, before using integer equality in the inner loop.
 This brought about a 32\% query speedup (2,299$\to$1,573\,ms) at the cost of +2.9\% memory and 16.7\% slower load time.
-The one load time cost is a penalty amortised across all the queries.
+The increased load time is a one-time penalty amortised across all the queries.
 
-\paragraph{Column splitting of \texttt{Month}.}
+\paragraph{Column Splitting of \texttt{Month}.}
 We split the date string into two integer columns at parse time.
 This eliminates repeated string parsings and allow for direct \texttt{uint16} range predicates.
-With just the Year predicate integer comparision, we eliminated ${\sim}90\%$ of rows.
+Using just the Year predicate alone eliminates ${\sim}90\%$ of rows.
 
 \paragraph{Precomputed PricePerSqm.}
-The storing of \texttt{price / area} as \texttt{float32} will reduce the per-row floating point division we had to do for entries that survived the filter.
+The storing of \texttt{(price / area)} as \texttt{float32} will reduce the per-row floating point division we had to do for entries that survived the filter.
 Only ${\sim}0.2\%$ of row iterations reach this division, the ${\sim}543$ survivors per query.
 This is why the measured speed up is only $<$0.1\%.
 
-\paragraph{Pre-sorted clustering.} \label{para:pre_sorted_clustering}
+\paragraph{Pre-sorted Clustering.} \label{para:pre_sorted_clustering}
 A \texttt{stable\_sort} by the key (Town, Year, Month) will physically reorder all columns once at ingestion.
 A linear pass then records each town partition's \texttt{[begin, end)} boundaries at a $O(1)$ lookup cost at query time.
-This is the foundation prerequisite for binary search (\S\ref{sec:binsearch}) and zone map chunks (\S\ref{sec:zonemaps}).
+This is a building block for binary search (\S\ref{sec:binsearch}) and zone map chunking (\S\ref{sec:zonemaps}).
 
-\paragraph{Separate binary column files.} \label{para:separate_binary_files}
-Every column is written to its own binary file during the CSV to columnar conversion.
+\paragraph{Separate Binary Column Files.} \label{para:separate_binary_files}
+Every column is written to its own binary file during the CSV to columnar database conversion.
 During query time, only the five filtered columns are loaded.
-Output columns are lazy loaded for surviving row per $(x,y)$ pairs.
-This drops memory usage from 71.4\,MB to 2.7\,MB, a 96.2\% reduction.
-Load time also falls from 2,536\,ms to 68\,ms.
-The value of this optimisation is in memory and load-time reduction.
-It does not have any improvements in query time and in fact is 2.0\% \emph{slower} because the binary I/O path still performs a full scan.
+Output columns are lazy loaded for each surviving row per $(x,y)$ pair.
+The value of this optimisation is in memory and load-time reduction; memory usage drops by 96.2\% from 71.4\,MB to 2.7\,MB, while load time also significantly falls from 2,536\,ms to 68\,ms. However, it incurs a 2.0\% \emph{slowdown} in query time, because the binary I/O path still performs a full scan.
 
 \subsection{Zone Maps}\label{sec:zonemaps}
-Every numeric filter column is divided into fixed size chunks of 1,024 rows, where its \texttt{(min, max)} entry is stored.
-There hence will be 254 chunks in total, with a size of $<$8\,KB.
-With \S\ref{para:pre_sorted_clustering}, a skip rate of 96.1\% is achieved across all 568 queries (138.6K of 144.3K chunks skipped).
+Every numeric filter column is divided into fixed size chunks of 1,024 rows, each storing a \texttt{(min, max)} entry.
+Hence, there will be 254 chunks in total, with a size of $<$8\,KB.
+With \S\ref{para:pre_sorted_clustering}, a significant 96.1\% of chunks are skipped across all 568 queries (138.6K of 144.3K chunks skipped), proving its time efficiency.
 
 \subsection{Bitmap Index on Town}\label{sec:bitmap}
 We build one \texttt{std::vector<bool>} for each distinct town at load time (26 bit-vectors $\times$ 259K bits $\approx$ 842\,KB).
@@ -384,15 +380,15 @@ Its overhead outweighted the cost of original comparisions as the Year predicate
 
 \paragraph{Chunked I/O.}
 Our system streams filtered columns from \S\ref{para:separate_binary_files} in bounded size chunks under a configurable memory budget.
-The outer loop iterates over the I/O chunks while the inner loop runs all 568 queries per chunk.
+The outer loop iterates over the I/O chunks, while the inner loop runs all 568 queries per chunk.
 It exploits the associativity of \texttt{min} to merge per-chunk winners.
 
 \paragraph{Memory-mapped I/O.}
-This feauture replaces \texttt{ifstream}/\texttt{fread} with POSIX \texttt{mmap(2)}.
+This feature replaces \texttt{ifstream}/\texttt{fread} with POSIX \texttt{mmap(2)}.
 It means each \texttt{.col} file is mapped into virtual address space with a single syscall, then \texttt{memcpy}'d into the existing column vectors.
 Load times drop from 68\,ms (A9 \texttt{ifstream}) to 31\,ms , a 55\% reduction.
 For lazy materialisation, \texttt{loadStringAtMmap} replaces \texttt{std::ifstream} construction with raw POSIX calls.
-Composed with \S\ref{sec:reuse}, it achieves the fastest total time of \textbf{71.9\,ms} (67.3$\times$ end-to-end).
+Combined with \S\ref{sec:reuse}, it achieves the fastest total time of \textbf{71.9\,ms} (67.3$\times$ end-to-end).
 
 \subsection{Physical Partitioning by Town}\label{sec:partition}
 Columnar binary files are split into one subdirectory per town.
@@ -424,13 +420,13 @@ We implement run-length encoding on sorted town columns by compressing \texttt{t
   \texttt{run\_value}[k],\; \texttt{run\_start}[k],\; \texttt{run\_length}[k].
 \]
 The query engine resolves requested towns to run IDs and scans only the selected intervals, skipping non-matching runs entirely instead of checking town equality for every row.
-Without pre-sorting (A5 alone), the unsorted column produces 2,570 runs; the engine still skips 122.86M rows via run boundaries, reducing rows scanned post-RLE to 24.39M and achieving a 10.5$\times$ query speedup.
-With pre-sorting (A2+A5), each town forms a single contiguous run (26 runs total), and town comparisons drop to zero.
-The strongest composition is B3+A2+A5: binary search narrows each town partition to the target month range, and RLE eliminates all remaining town equality checks, yielding a 180$\times$ query speedup (13.7\,ms query time).
+Without pre-sorting (\S\ref{sec:layout-discussion}), the unsorted column produces 2,570 runs; the engine still skips 122.86M rows via run boundaries, reducing rows scanned post-RLE to 24.39M and achieving a 10.5$\times$ query speedup.
+With pre-sorting, each town now forms a single contiguous run (26 runs total), and town comparisons drop to zero.
+The strongest composition happens when including binary search techniques, which narrows each town partition to the target month range, and RLE eliminates all remaining town equality checks, yielding a 180$\times$ query speedup (13.7\,ms query time).
 
 \subsection{Exception Handling}\label{sec:except}
 In empty result sets, we return a ``No result'' row in our output.
-Ties in minimum price-per-sqm are resolved by first encountered order.
+If there are ties in minimum price-per-sqm, the system only keeps the first one it sees during scans.
 
 \subsection{Space--Time Trade-off Summary}\label{sec:tradeoff-summary}
 
@@ -459,7 +455,7 @@ RLE Town column (A5)        & $+\epsilon$ mem             & $-$90.5\% query & ke
 
 \subsection{Baseline Scan}\label{sec:baseline}
 The baseline scans all 259,237 rows for each of 568 $(x,y)$ pairs.
-Predicates are evaluated in the order Year~$\to$~Month~$\to$~Town~$\to$~Area; Year is checked first because it eliminates ${\sim}90\%$ of rows with a single \texttt{uint16} equality before the more expensive Town iteration runs.
+Predicates are evaluated in the order Year ~$\to$~ Month ~$\to$~ Town ~$\to$~ Area; Year is checked first because it eliminates ${\sim}90\%$ of rows with a single \texttt{uint16} equality before the more expensive Town iteration runs.
 
 \begin{lstlisting}[caption={Baseline scan loop in \texttt{runQuery} (simplified).}]
 for (size_t i = 0; i < N; ++i) {
@@ -482,15 +478,15 @@ Across the full grid this produces 147.25M row iterations and 12.55M town compar
 \subsection{Composable Scan Architecture}\label{sec:compose}
 
 All 15 optimisations are controlled by independent boolean flags in the \texttt{ColumnStore} struct (toggled via \texttt{OptConfig} in the evaluation suite).
-The query engine has three paths: (1)~a \emph{reuse path} (C1+C2) that short-circuits via the cumulative table (\S\ref{sec:reuse}), (2)~a \emph{unified scan loop} where each flag controls one orthogonal decision---A1 selects int vs.\ string comparison, B1 wraps the loop in chunk-level pruning, B2 replaces the town predicate with a bitmap mask, A5 replaces per-row town checks with run-level skipping, C4 reorders predicates, C6 gates float computation, A4 selects the PPSM source, and C3 defers the price column to a Phase~2 survivors pass, and (3)~a \emph{partition-pruned path} (E1) that loads only target-town data before entering either path~(1) or~(2).
-D2 (mmap) is an I/O-layer substitution under A9, transparent to the scan logic.
+The query engine has three paths: (1)~a \emph{reuse path} (\S\ref{sec:reuse}) that short-circuits via the cumulative table, (2)~a \emph{unified scan loop} where each flag controls one orthogonal decision; \textbf{Dictionary Encoding} selects int vs.\ string comparison, \textbf{Zone Maps} wraps the loop in chunk-level pruning, \textbf{Bitmap Indexes} replaces the town predicate with a bitmap mask, A5 replaces per-row town checks with run-level skipping, \textbf{RLE} reorders predicates, \textbf{Integer Early-Exit Gates} float computation, \textbf{Precomputed PricePerSqm} selects the PPSM source, and \textbf{Late Materialization} defers the price column to a Phase~2 survivors pass, and (3)~a \emph{partition-pruned path} (\S\ref{sec:partition}) that loads only target-town data before entering either path~(1) or~(2).
+\textbf{Memory-mapped I/O} is an I/O-layer substitution under \textbf{Separate Binary Column Files} , transparent to the scan logic.
 This composability allows the evaluation suite to test ${\sim}40$ configurations and isolate each contribution.
 
 \subsection{Result Reuse (C1+C2)}\label{sec:reuse}
 
 The 568 queries overlap: for fixed $y$, the month window for $x{=}k$ is a superset of $x{=}k{-}1$; for fixed $x$, every record with $\texttt{area} \ge y$ also satisfies $\texttt{area} \ge y{-}1$.
 
-\paragraph{Three-step cumulative table build.}
+\paragraph{Three-step Cumulative Table Build.}
 \textbf{Step~1 (single $O(N)$ scan):} For each row passing year and town filters, compute $\textit{offset} = \texttt{month} - \textit{start} + 1$ (range 1--8) and $\textit{bucket} = \min(\texttt{area},\, 150)$.
 Records with $\texttt{area} > 150$ are \emph{clamped} to bucket 150, not dropped---this is correct because every valid $y$ threshold is $\le 150$, so a record with area 160 satisfies every $y$ and must contribute to all buckets it qualifies for; the clamped bucket propagates into all lower buckets during the Y-sweep.
 \textbf{Step~2 (X-sweep):} For each area bucket, sweep offsets $1 \to 8$, propagating a running minimum.
@@ -502,7 +498,7 @@ The full C++ implementation is given in Figure~\ref{fig:cumtable} (Appendix).
 C1+C2 alone reduces query time from 2,299.5\,ms to 4.6\,ms (499$\times$ query speedup), with rows scanned dropping from 147.25M to 259.2K (the single build scan).
 When composed with dictionary encoding (A1+C1+C2), query time drops to 3.1\,ms (749$\times$).
 
-\subsection{Pre-sort + Binary Search (A2+B3)}\label{sec:binsearch}
+\subsection{Pre-sort + Binary Search}\label{sec:binsearch}
 
 With data pre-sorted by (Town, Year, Month), the query engine runs custom \texttt{lowerBound}/\texttt{upperBound} searches within each town partition using a linearised month key ($\texttt{year} \times 12 + \texttt{month} - 1$):
 
@@ -523,7 +519,7 @@ size_t lowerBoundMonthKey(const ColumnStore& db, size_t l, size_t r,
 Rows scanned drop from 147.25M to 751.7K (99.5\% reduction), town comparisons fall to zero, and query time drops to 11.9\,ms (193$\times$ query speedup).
 This is an independent scan-elimination path from C1+C2.
 
-\subsection{Late Materialisation (C3)}\label{sec:c3}
+\subsection{Late Materialisation}\label{sec:c3}
 
 Phase~1 applies only the four predicate columns, appending survivor indices to a vector.
 Phase~2 iterates survivors to fetch Resale\_Price, compute PricePerSqm, and track the minimum.
@@ -531,18 +527,18 @@ Measured result: 0.7\% \emph{slowdown} (2,315\,ms vs.\ 2,299\,ms), essentially w
 
 \subsection{Other Scan Optimisations}\label{sec:other}
 
-\paragraph{Zone-map chunk skipping (B1).}
+\paragraph{Zone-map Chunk Skipping.}
 Before scanning a 1,024-row chunk, the engine tests its min/max against Year, Month, and Floor\_Area predicates; failing chunks are skipped entirely (96.1\% skip rate, 25\% standalone query speedup; combined with A1: 58\%).
 
-\paragraph{Bitmap-driven row filtering (B2).}
+\paragraph{Bitmap-driven Row Filtering.}
 A precomputed \texttt{uint8\_t} mask replaces the per-row town loop with a single byte lookup.
 Town comparisons drop to zero, but query time regressed to $0.15\times$ ($15{,}670$\,ms vs.\ $2{,}299$\,ms baseline): the byte-load-plus-branch on every row is more expensive than the original integer comparison that runs only on the ${\sim}10\%$ of rows surviving the Year filter.
 This confirms that the baseline Year$\to$Month$\to$Town order is already near-optimal.
 
-\paragraph{Predicate reordering (C4).}
+\paragraph{Predicate Reordering.}
 Reordering to Town~$\to$~Year~$\to$~Month~$\to$~Area caused a $0.06\times$ regression: town comparisons surged from 12.55M to 417.51M because every row now pays the expensive Town list iteration before the cheap Year check can eliminate it. The lesson: optimal order must minimise \emph{cost~$\times$~pass\_rate}, not maximise selectivity alone.
 
-\paragraph{Integer early-exit gate (C6).}
+\paragraph{Integer Early-exit Gate.}
 Tests $\texttt{price} \times \texttt{cur\_min\_area} \ge \texttt{cur\_min\_price} \times \texttt{area}$ in \texttt{uint64} before computing float PricePerSqm.
 Measured: within noise---too few survivors (${\sim}543$/query) for the eliminated float work to register.
 
