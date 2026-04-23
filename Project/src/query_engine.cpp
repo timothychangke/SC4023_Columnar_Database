@@ -220,6 +220,7 @@ void runQuery(const ColumnStore&              db,
             local_town_mask = buildTownBitmapMaskImpl(db, towns);
             town_mask_ptr = &local_town_mask;
         }
+      }
     if (db.use_rle_town) {
         db.town_runs_scanned = 0;
         db.rows_skipped_by_rle = 0;
