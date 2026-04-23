@@ -360,6 +360,29 @@ struct ColumnStore {
     // binary search over month range within each town partition.
     bool use_month_binary_search = false;
 
+    // === A5: Run-Length Encoding on Town ===
+    // Build run markers on the final in-memory row order.
+    // Best benefit when combined with A2 (long contiguous town runs).
+    bool use_rle_town = false;
+
+    // Dictionary mode run values (preferred when A1 is enabled)
+    std::vector<uint16_t> town_run_value_encoded;
+    // String mode run values (fallback when A1 is disabled)
+    std::vector<std::string> town_run_value;
+
+    // Run boundaries: run k covers [town_run_start[k], town_run_start[k] + town_run_length[k])
+    std::vector<uint32_t> town_run_start;
+    std::vector<uint32_t> town_run_length;
+
+    // Optional helper indexes for fast run lookup by town
+    std::unordered_map<uint16_t, std::vector<uint32_t>> town_to_runs_encoded;
+    std::unordered_map<std::string, std::vector<uint32_t>> town_to_runs;
+
+    // A5 observability counters (updated during query execution)
+    mutable uint64_t town_runs_scanned = 0;
+    mutable uint64_t rows_skipped_by_rle = 0;
+    mutable uint64_t rows_scanned_after_rle = 0;
+
     // helper methods
     
     // return total records stored 
@@ -368,6 +391,9 @@ struct ColumnStore {
     // (Re)build the B2 town bitmap index from current row order.
     // Must be called after any row reordering (e.g. A2 presort).
     void rebuildTownBitmaps();
+    
+    // Build town run-length metadata from current row order.
+    void buildTownRLE();
 
     // clear data and free memory
     void clear();

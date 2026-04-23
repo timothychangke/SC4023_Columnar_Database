@@ -40,6 +40,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <MatriculationNumber> [flags...]\n"
         << "Flags: --dict-encoding --bitmap-index-town --presort-storage --month-bsearch --reuse\n"
+        << "Flags: --dict-encoding --presort-storage --month-bsearch --rle-town --reuse\n"
         << "       --precompute-ppsm --int-multiply --predicate-reorder --zone-maps --late-materialise\n";
         << "       --mmap-io --town-partitioning --write-columns-partitioned\n";
         std::cerr << "Example: " << argv[0] << " A5656567B\n";
@@ -64,6 +65,7 @@ int main(int argc, char* argv[]) {
     bool enable_columnar_files = false;
     bool enable_mmap_io = false;
     bool enable_town_partitioning = false;
+    bool enable_rle_town = false;
     bool write_columns_mode = false;
     bool write_columns_partitioned_mode = false;
 
@@ -103,6 +105,9 @@ int main(int argc, char* argv[]) {
         }
         if (std::strcmp(argv[i], "--mmap-io") == 0) {
             enable_mmap_io = true;
+        if (std::strcmp(argv[i], "--rle-town") == 0 ||
+            std::strcmp(argv[i], "--rle") == 0) {
+            enable_rle_town = true;
         }
         if (std::strcmp(argv[i], "--write-columns") == 0) {
             write_columns_mode = true;
@@ -135,6 +140,8 @@ int main(int argc, char* argv[]) {
             << (enable_presorted_storage ? "ON" : "OFF") << "\n";
         std::cout << "  Month Binary Search (B3):      "
             << (enable_month_bsearch ? "ON" : "OFF") << "\n";
+            std::cout << "  RLE Town (A5):                 "
+                  << (enable_rle_town ? "ON" : "OFF") << "\n";
     std::cout << "  Late Materialisation:            "
               << (enable_late_materialise ? "ON" : "OFF") << "\n";
     std::cout << "  Columnar Files:              "
@@ -180,6 +187,7 @@ int main(int argc, char* argv[]) {
     db.use_bitmap_index_town = enable_bitmap_index_town;
     db.use_presorted_storage = enable_presorted_storage;
     db.use_month_binary_search = enable_month_bsearch;
+    db.use_rle_town = enable_rle_town;
     db.use_late_materialise = enable_late_materialise;
     db.use_columnar_files = enable_columnar_files;
     db.use_mmap_io = enable_mmap_io;
