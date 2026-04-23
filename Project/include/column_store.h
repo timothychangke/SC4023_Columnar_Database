@@ -115,7 +115,6 @@ struct ColumnStore {
     std::vector<uint16_t> col_month_year;   // eg 2017
     std::vector<uint8_t>  col_month_month;  // eg 6 for june
 
-    // ---- baseline string columns ----
 
     // Town eg "JURONG WEST"
     std::vector<std::string> col_town;
@@ -143,8 +142,6 @@ struct ColumnStore {
 
     // Resale price in SGD
     std::vector<uint32_t> col_resale_price;
-
-    // ---- dictionary-encoded columns (only populated when use_dict_encoding=true) ----
 
     std::vector<uint16_t> col_town_encoded;
     std::vector<uint16_t> col_flat_type_encoded;

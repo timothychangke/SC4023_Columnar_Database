@@ -307,7 +307,7 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
 
     std::cout << "Column files loaded: " << N << " rows from " << dir << "\n";
 
-    // ── B1: build zone maps if enabled (normally done inside loadCSV) ──
+    // build zone maps if enabled (normally done inside loadCSV) ──
     if (db.use_zone_maps) {
         const std::size_t num_chunks = (N + ZONE_CHUNK_SIZE - 1) / ZONE_CHUNK_SIZE;
 
@@ -519,7 +519,7 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
                                    chunk_start, chunk_rows, db.col_town_encoded);
     }
 
-    // A4: precomputed PPSM column (if the on-disk copy exists)
+    // precomputed PPSM column (if the on-disk copy exists)
     if (db.use_precomputed_ppsm) {
         readNumericRange<double>(dir + "/price_per_sqm.col",
                                  chunk_start, chunk_rows, db.col_price_per_sqm);
@@ -622,7 +622,7 @@ void loadColumnFilesMmap(const std::string& dir, ColumnStore& db) {
         // String columns can't be trivially mmapped into vectors,
         // fall back to ifstream for the string column
         std::ifstream f(dir + "/town.col", std::ios::binary);
-        if (!f.is_open()) throw std::runtime_error("D2: cannot open town.col");
+        if (!f.is_open()) throw std::runtime_error("cannot open town.col");
         uint32_t file_N = 0;
         f.read(reinterpret_cast<char*>(&file_N), sizeof(file_N));
         std::vector<uint32_t> offsets(file_N + 1);
@@ -776,7 +776,7 @@ uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
 
 void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_dir) {
     if (db.town_partitions.empty()) {
-        throw std::runtime_error("E1: town_partitions is empty — requires presorted storage");
+        throw std::runtime_error("town_partitions is empty — requires presorted storage");
     }
 
     std::filesystem::create_directories(base_dir);
@@ -785,7 +785,7 @@ void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_
     auto writeNumericRange = [](const auto& vec, std::size_t begin, std::size_t end,
                                 const std::string& filepath) {
         std::ofstream f(filepath, std::ios::binary);
-        if (!f.is_open()) throw std::runtime_error("E1: cannot open " + filepath);
+        if (!f.is_open()) throw std::runtime_error("cannot open " + filepath);
         const uint32_t N = static_cast<uint32_t>(end - begin);
         f.write(reinterpret_cast<const char*>(&N), sizeof(N));
         f.write(reinterpret_cast<const char*>(vec.data() + begin), N * sizeof(vec[0]));
@@ -795,7 +795,7 @@ void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_
                                std::size_t begin, std::size_t end,
                                const std::string& filepath) {
         std::ofstream f(filepath, std::ios::binary);
-        if (!f.is_open()) throw std::runtime_error("E1: cannot open " + filepath);
+        if (!f.is_open()) throw std::runtime_error("cannot open " + filepath);
         const uint32_t N = static_cast<uint32_t>(end - begin);
         f.write(reinterpret_cast<const char*>(&N), sizeof(N));
 
@@ -823,7 +823,7 @@ void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_
         // Write a mini meta.col for this partition
         {
             std::ofstream f(town_dir + "/meta.col", std::ios::binary);
-            if (!f.is_open()) throw std::runtime_error("E1: cannot open meta.col in " + town_dir);
+            if (!f.is_open()) throw std::runtime_error("cannot open meta.col in " + town_dir);
             const uint32_t N = static_cast<uint32_t>(end - begin);
             f.write(reinterpret_cast<const char*>(&N), sizeof(N));
             uint8_t flags = 0;
@@ -927,11 +927,11 @@ void loadColumnFilesPartitioned(const std::string& base_dir,
         auto appendNumericCol = [&](auto& vec, const std::string& name) {
             using T = typename std::remove_reference<decltype(vec)>::type::value_type;
             std::ifstream f(town_dir + "/" + name, std::ios::binary);
-            if (!f.is_open()) throw std::runtime_error("E1: cannot open " + town_dir + "/" + name);
+            if (!f.is_open()) throw std::runtime_error("cannot open " + town_dir + "/" + name);
             uint32_t file_N = 0;
             f.read(reinterpret_cast<char*>(&file_N), sizeof(file_N));
             if (file_N != part_N) {
-                throw std::runtime_error("E1: row count mismatch in " + name);
+                throw std::runtime_error("row count mismatch in " + name);
             }
             const std::size_t prev = vec.size();
             vec.resize(prev + file_N);
@@ -958,7 +958,7 @@ void loadColumnFilesPartitioned(const std::string& base_dir,
         // Load materialisation columns so post-scan can index by best_i
         auto appendStringCol = [&](std::vector<std::string>& col, const std::string& name) {
             std::ifstream f(town_dir + "/" + name, std::ios::binary);
-            if (!f.is_open()) throw std::runtime_error("E1: cannot open " + town_dir + "/" + name);
+            if (!f.is_open()) throw std::runtime_error("cannot open " + town_dir + "/" + name);
             uint32_t file_N = 0;
             f.read(reinterpret_cast<char*>(&file_N), sizeof(file_N));
             std::vector<uint32_t> offsets(file_N + 1);

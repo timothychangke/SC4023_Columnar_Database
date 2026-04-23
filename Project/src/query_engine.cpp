@@ -90,7 +90,7 @@ std::size_t upperBoundMonthKey(const ColumnStore& db,
     }
     return l;
 }
-} // namespace
+} 
 
 
 std::vector<std::string> buildTownList(const std::string& matric_number) {
@@ -185,7 +185,7 @@ void runQuery(const ColumnStore&              db,
 
     const std::size_t N = db.size();
 
-    // Bitmap setup: reuse a precomputed town mask when available ---
+    // Bitmap setup: reuse a precomputed town mask when available 
     std::vector<uint8_t> local_town_mask;
     const std::vector<uint8_t>* town_mask_ptr = precomputed_town_mask;
     bool use_bitmap_path = db.use_bitmap_index_town &&
@@ -386,7 +386,7 @@ void runQuery(const ColumnStore&              db,
 
                 if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
 
-                // C6: cheap integer check before division.
+                // cheap integer check before division.
                 // If price > 4725 * area, PPSM must be > 4725, so skip early.
                 if (db.use_int_multiply) {
                     if (static_cast<uint64_t>(db.col_resale_price[i]) >
@@ -403,7 +403,7 @@ void runQuery(const ColumnStore&              db,
                 if (ppsm < min_ppsm) {
                     min_ppsm = ppsm;
                     best_i   = i;
-                    result.local_idx = i;  // A9: needed for columnar file lazy materialisation
+                    result.local_idx = i;  
                     result.no_result = false;
                 }
             }
@@ -444,7 +444,7 @@ void runQuery(const ColumnStore&              db,
     }
 
 
-    // Dict Encoding setup: pre-resolve town IDs once (outside the loop) ---
+    // Dict Encoding setup: pre-resolve town IDs once (outside the loop)
     std::vector<uint16_t> town_ids;
     if (db.use_dict_encoding && !use_bitmap_path && !db.use_town_partitioning) {
         town_ids.reserve(towns.size());
@@ -466,16 +466,14 @@ void runQuery(const ColumnStore&              db,
     const uint32_t end_month_32   = static_cast<uint32_t>(end_month);
     const uint32_t y_threshold    = static_cast<uint32_t>(y);
 
-    // Late Mat setup: late materialisation survivor list ---
+    // Late Mat setup: late materialisation survivor list 
     std::vector<size_t> survivors;
     if (db.use_late_materialise) {
         survivors.reserve(N / 20);
     }
 
-    // ====================== OUTER LOOP: chunks ======================
     for (std::size_t chunk = 0; chunk < num_chunks; ++chunk) {
 
-        // --- B1: zone map chunk pruning (skipped entirely when flag is off) ---
         if (db.use_zone_maps) {
             // year: if no row in this chunk has the target year, skip
             if (!db.zm_month_year.chunkMayContainEQ(chunk, target_year_32))
@@ -489,13 +487,12 @@ void runQuery(const ColumnStore&              db,
                 continue;
         }
 
-        // --- row bounds for this chunk ---
+        // row bounds for this chunk 
         const std::size_t row_start = db.use_zone_maps ? chunk * ZONE_CHUNK_SIZE : 0;
         const std::size_t row_end   = db.use_zone_maps
             ? std::min(row_start + ZONE_CHUNK_SIZE, N)
             : N;
 
-        // =================== INNER LOOP: rows =======================
         for (std::size_t i = row_start; i < row_end; ++i) {
 
 
@@ -508,7 +505,7 @@ void runQuery(const ColumnStore&              db,
             }
 
             if (db.use_predicate_reorder) {
-                // Predicate Reordering ON: Town FIRST (eliminates ~80% of rows) ---
+                // Predicate Reordering ON: Town FIRST (eliminates ~80% of rows)
                 if (!use_bitmap_path && !db.use_town_partitioning) {
                     if (db.use_dict_encoding) {
                         bool match = false;
@@ -532,14 +529,14 @@ void runQuery(const ColumnStore&              db,
                 if (m < start_month || m > end_month) continue;
 
             } else {
-                // Predicate Reordering OFF: baseline order — Year → Month → Town ---
+                // Predicate Reordering OFF: baseline order — Year → Month → Town 
                 if (db.col_month_year[i] != target_year) continue;
 
                 const uint8_t m = db.col_month_month[i];
                 if (m < start_month || m > end_month) continue;
 
                 // town match 
-                // E1: skip when town_partitioning is on — data is pre-filtered
+                // skip when town_partitioning is on — data is pre-filtered
                 if (!use_bitmap_path && !db.use_town_partitioning) {
                     if (db.use_dict_encoding) {
                         bool match = false;
@@ -558,21 +555,20 @@ void runQuery(const ColumnStore&              db,
                 }
             }
 
-            // floor area threshold (same position regardless of C4)
             if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
 
-            // ---- C3: Late Materialisation — defer price access ----
+            // Late Materialisation — defer price access 
             if (db.use_late_materialise) {
                 survivors.push_back(i);
             } else {
-                // ---- C6: Integer Multiplication Trick ----
+                // Integer Multiplication Trick 
                 if (db.use_int_multiply) {
                     if (static_cast<uint64_t>(db.col_resale_price[i]) >
                         4725ULL * static_cast<uint64_t>(db.col_floor_area[i]))
                         continue;
                 }
 
-                // ---- A4: Pre-computed PPSM vs. on-the-fly division ----
+                // Pre-computed PPSM vs. on-the-fly division 
                 const double ppsm = db.use_precomputed_ppsm
                     ? db.col_price_per_sqm[i]
                     : static_cast<double>(db.col_resale_price[i]) /
@@ -590,14 +586,14 @@ void runQuery(const ColumnStore&              db,
 
     if (db.use_late_materialise) {
         for (const size_t idx : survivors) {
-            // C6: integer gate on survivors
+            // integer gate on survivors
             if (db.use_int_multiply) {
                 if (static_cast<uint64_t>(db.col_resale_price[idx]) >
                     4725ULL * static_cast<uint64_t>(db.col_floor_area[idx]))
                     continue;
             }
 
-            // A4: precomputed vs on-the-fly
+            // precomputed vs on-the-fly
             const double ppsm = db.use_precomputed_ppsm
                 ? db.col_price_per_sqm[idx]
                 : static_cast<double>(db.col_resale_price[idx]) /
@@ -699,7 +695,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         if (area < 80) continue;
         const unsigned bucket = (area > 150) ? 150u : area;
 
-        // compute ppsm (A4: use pre-computed if available)
+        // compute ppsm (use pre-computed if available)
         const double ppsm = db.use_precomputed_ppsm
             ? db.col_price_per_sqm[i]
             : static_cast<double>(db.col_resale_price[i]) /
@@ -770,7 +766,6 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
     base_db.io_chunks_loaded = 0;
     base_db.io_bytes_read    = 0;
 
-    // ============================= OUTER LOOP: chunks =======================
     for (std::size_t chunk_start = 0; chunk_start < N; chunk_start += chunk_rows) {
         const std::size_t this_chunk_rows = std::min(chunk_rows, N - chunk_start);
 
@@ -802,7 +797,7 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
         base_db.io_bytes_read = before_bytes + part.io_bytes_read;
         base_db.io_chunks_loaded++;
 
-        // B1: rebuild zone maps for this chunk (cheap: O(this_chunk_rows)).
+        // rebuild zone maps for this chunk (cheap: O(this_chunk_rows)).
         if (base_db.use_zone_maps) {
             const std::size_t nc =
                 (this_chunk_rows + ZONE_CHUNK_SIZE - 1) / ZONE_CHUNK_SIZE;
@@ -873,11 +868,8 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
                 }
             }
         }
-
-        // `part` goes out of scope here — all per-chunk memory is freed.
     }
 
-    // MATERIALISATION: lazy load display columns for the global winners.
     // MATERIALISATION: lazy load display columns for the global winners.
     for (std::size_t slot = 0; slot < NSLOTS; ++slot) {
         if (results[slot].no_result) continue;

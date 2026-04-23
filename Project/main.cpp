@@ -182,7 +182,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Column files written. Now run with --columnar-files.\n";
         return 0;
     }
-    // E1: One-time partitioned conversion mode
+    // One-time partitioned conversion mode
     if (write_columns_partitioned_mode) {
         try {
             loadCSV("../data/ResalePricesSingapore.csv", db);
