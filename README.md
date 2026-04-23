@@ -1,6 +1,13 @@
-# CE/CZ4123/SC4023 — Big Data Management: Semester Group Project
+SC4023 — Big Data Management: Semester Group Project
 
-A column-oriented in-memory database engine written in C++ for querying Singapore HDB resale flat transaction records (2015–2025).
+Our column-oriented in-memory database engine written in C++17 for querying Singapore HDB resale flat transaction records (2015–2025). The engine implements **15 toggleable optimisations** spanning five architectural layers and is benchmarked across **50+ configurations** with automated correctness verification.
+
+**Group members:**
+
+| Name | Matric No. |
+|------|-----------|
+| Timothy Chang | U2220136J |
+| Neo Zhi Xuan | U2222293E |
 
 ---
 
@@ -11,9 +18,12 @@ A column-oriented in-memory database engine written in C++ for querying Singapor
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Building](#building)
-- [Usage](#usage)
-- [Evaluation Suite Usage](#evaluation-suite-usage)
-- [How Query Parameters Are Derived](#how-query-parameters-are-derived)
+- [Running](#running)
+- [Optimisation Flags](#optimisation-flags)
+- [Recommended Configurations](#recommended-configurations)
+- [Evaluation Suite](#evaluation-suite)
+- [Unit Tests](#unit-tests)
+- [Query Parameter Derivation](#query-parameter-derivation)
 - [Output Format](#output-format)
 - [Error Handling](#error-handling)
 
@@ -21,33 +31,41 @@ A column-oriented in-memory database engine written in C++ for querying Singapor
 
 ## Overview
 
-This program ingests the `ResalePricesSingapore.csv` dataset and answers the following query:
+This program ingests the `ResalePricesSingapore.csv` dataset (259,237 records) and answers the following query:
 
-> For each valid `(x, y)` pair — where `x` is a window of months (1–8) and `y` is a minimum floor area in m² (80–150) — find the HDB resale record with the **minimum price per square metre** within a filtered set of towns and time window. A pair is considered valid if that minimum price per square metre is **at most 4725 SGD/m²**.
+> For each valid `(x, y)` pair — where `x` is a window of months (1–8) and `y` is a minimum floor area in m² (80–150) — find the HDB resale record with the **minimum price per square metre** within a filtered set of towns and time window. A pair is valid if that minimum price per square metre is **at most 4725 SGD/m²**.
 
-Query parameters (target year, start month, and towns) are derived from a matriculation number provided at runtime.
+Query parameters (target year, start month, and towns) are derived from a matriculation number provided at runtime. For our submission matric `U2220136J`, this yields: year **2016**, start month **3 (March)**, towns **{CLEMENTI, BEDOK, BUKIT PANJANG, CHOA CHU KANG, PASIR RIS}**, producing **568** valid `(x, y)` pairs.
 
 ---
 
 ## Project Structure
 
 ```
-project/
-├── Makefile
-├── main.cpp                   # Entry point — orchestrates all four phases
+Project/
+├── Makefile                        # Build targets: make, make run, make test, make eval
+├── main.cpp                        # Entry point — CLI parsing, orchestration
 ├── include/
-│   ├── column_store.h         # ColumnStore struct definition
-│   ├── csv_parser.h           # CSV ingestion declarations
-│   ├── query_engine.h         # QueryResult struct + query function declarations
-│   └── output_writer.h        # Output writer declaration
-└── src/
-    ├── column_store.cpp       # ColumnStore::size() and ::clear()
-    ├── csv_parser.cpp         # CSV parsing and loadCSV() implementation
-    ├── query_engine.cpp       # Query parameter derivation and scan logic
-    └── output_writer.cpp      # writeResults() implementation
+│   ├── column_store.h              # ColumnStore struct, DictionaryEncoder, zone maps, RLE metadata
+│   ├── csv_parser.h                # CSV ingestion declarations
+│   ├── query_engine.h              # QueryResult struct, runQuery, buildCumulativeTable
+│   ├── output_writer.h             # CSV output writer declaration
+│   └── column_file_io.h            # Binary column file I/O (A9), mmap (D2), partitioned I/O (E1)
+├── src/
+│   ├── column_store.cpp            # ColumnStore::size(), ::clear(), memory estimation
+│   ├── csv_parser.cpp              # CSV parsing, A1 dict encoding, A2 pre-sorting, A4 PPSM, A5 RLE
+│   ├── query_engine.cpp            # Query parameter derivation, scan logic, all query-path optimisations
+│   ├── output_writer.cpp           # writeResults() — ScanResult CSV generation
+│   └── column_file_io.cpp          # Column file read/write, mmap, chunked I/O, partitioned files
+├── eval/
+│   └── eval_suite.cpp              # Benchmarking harness — 50+ configs, correctness verification
+├── tests/
+│   └── test_suite.cpp              # Unit tests for each optimisation
+├── data/
+│   └── columns*/                   # Generated binary column files (created by --write-columns)
+└── results/
+    └── EvalResult_*.txt            # Evaluation suite output files
 ```
-
-Each file has a single, clearly bounded responsibility so that future changes — e.g. adding compression, changing the input format, or adding new query types — are isolated to the relevant file.
 
 ---
 
@@ -55,40 +73,38 @@ Each file has a single, clearly bounded responsibility so that future changes �
 
 ### Column-Oriented Storage
 
-Data is stored in a strict **column store**. There is no `Row` or `Record` object anywhere in the codebase. Instead, each attribute of the dataset lives in its own independent `std::vector`, all kept at equal length (parallel alignment):
+Data is stored in a strict **column store** — there is no `Row` or `Record` object anywhere. Each attribute lives in its own `std::vector`, all kept at equal length (parallel alignment):
 
 ```
-col_month_year[i]          col_month_month[i]
-col_town[i]                col_block[i]
-col_street_name[i]         col_flat_type[i]
-col_flat_model[i]          col_storey_range[i]
-col_floor_area[i]          col_lease_commence_date[i]
-col_resale_price[i]
+col_month_year[i]          col_month_month[i]         col_town[i]
+col_block[i]               col_street_name[i]         col_flat_type[i]
+col_flat_model[i]          col_storey_range[i]        col_floor_area[i]
+col_lease_commence_date[i] col_resale_price[i]
 ```
 
-Index `i` across every vector always refers to the same logical transaction record. This layout avoids loading irrelevant columns during a scan and is the defining property of a column store.
+Index `i` across every vector always refers to the same logical record.
 
 ### Data Type Choices
 
-| Column              | C++ Type      | Rationale                                   |
-| ------------------- | ------------- | ------------------------------------------- |
-| Month year          | `uint16_t`    | 4-digit year; 2 bytes vs 4 for `int`        |
-| Month month         | `uint8_t`     | Value 1–12; only 1 byte needed              |
-| Floor area          | `uint16_t`    | Area in m²; max ~200, well within 65,535    |
-| Lease commence date | `uint16_t`    | 4-digit year; same reasoning as above       |
-| Resale price        | `uint32_t`    | Up to ~$1.5M SGD; safe within the 4.29B max |
-| String columns      | `std::string` | No encoding applied at this stage           |
+| Column | C++ Type | Size | Rationale |
+|--------|----------|------|-----------|
+| Month year | `uint16_t` | 2 B | 4-digit year fits in 16 bits |
+| Month month | `uint8_t` | 1 B | Values 1–12 |
+| Floor area | `uint16_t` | 2 B | Max ~200 m² |
+| Lease commence date | `uint16_t` | 2 B | 4-digit year |
+| Resale price | `uint32_t` | 4 B | Up to ~$1.5M SGD |
+| String columns | `std::string` | var | No encoding in baseline; A1 adds uint16 encoded columns |
 
-The `Month` source column (`"YYYY-MM"`) is **decomposed at ingestion time** into two integer columns. This avoids repeated string parsing on every query scan.
+The source `Month` column (`"YYYY-MM"`) is **decomposed at ingestion** into two integer columns, eliminating repeated string parsing during scans.
 
 ---
 
 ## Requirements
 
-- C++17 or later
-- `g++` (GCC) or any compatible compiler
-- `make`
-- `ResalePricesSingapore.csv` placed in the same directory as the executable
+- **C++17** or later
+- **g++** (GCC) or **clang++** — tested on macOS (Apple Clang) and Linux (GCC 11+)
+- **GNU Make**
+- `ResalePricesSingapore.csv` placed in `../data/` relative to the `Project/` directory
 
 ---
 
@@ -98,309 +114,274 @@ The `Month` source column (`"YYYY-MM"`) is **decomposed at ingestion time** into
 # Build the executable
 make
 
-# Remove compiled objects and the executable
+# Build and run with our matric number (U2220136J)
+make run
+
+# Build and run unit tests
+make test
+
+# Build and run the full evaluation suite (50+ configs, 5 iterations each)
+make eval
+
+# Remove all build artefacts
 make clean
 ```
 
-To build manually without `make`:
+To build manually without Make:
 
 ```bash
-g++ -std=c++17 -O2 -I include \
-    src/column_store.cpp \
-    src/csv_parser.cpp \
-    src/query_engine.cpp \
-    src/output_writer.cpp \
-    eval/eval_suite.cpp \
-    src/column_file_io.cpp \
-    -o eval_suite
-```
-
-To run unit tests:
-
-```bash
-make test
-# Or
 g++ -std=c++17 -Wall -Wextra -Iinclude \
-        tests/test_suite.cpp \
-        src/column_store.cpp \
-        src/csv_parser.cpp \
-        src/query_engine.cpp \
-        src/output_writer.cpp \
-        src/column_file_io.cpp \
-        -o test_runner
-```
-
-To build the evaluation suite:
-
-```bash
-g++ -std=c++17 -Wall -Wextra -Iinclude  eval/eval_suite.cpp  src/column_store.cpp src/csv_parser.cpp  src/query_engine.cpp  src/output_writer.cpp  src/column_file_io.cpp  -o eval_runner
+    main.cpp src/column_store.cpp src/csv_parser.cpp \
+    src/query_engine.cpp src/output_writer.cpp src/column_file_io.cpp \
+    -o column_store
 ```
 
 ---
 
-## Usage
+## Running
+
+### Basic usage (no optimisations — baseline)
 
 ```bash
-./column_store <MatriculationNumber>
+./column_store U2220136J
 ```
 
-**Example:**
-
-```bash
-./column_store A5656567B
-```
-
-The program will:
-
-1. Derive the target year, start month, and town list from the matriculation number.
-2. Load `ResalePricesSingapore.csv` into the column store.
-3. Run all 568 `(x, y)` queries (`x` ∈ [1,8], `y` ∈ [80,150]).
-4. Write valid results to `ScanResult_A5656567B.csv`.
-
-### Optimisation flags (including A5)
-
-Common runtime flags:
-
-- `--dict-encoding` (A1)
-- `--presort-storage` (A2)
-- `--rle-town` or `--rle` (A5)
-- `--month-bsearch` (B3)
-- `--zone-maps` (B1)
-- `--precompute-ppsm` (A4)
-- `--int-multiply` (C6)
-- `--predicate-reorder` (C4)
-- `--late-materialise` (C3)
-- `--reuse` (C1/C2)
-- `--columnar-files` (A9)
-
-Example:
-
-```bash
-./column_store A5656567B --dict-encoding --presort-storage --rle-town --month-bsearch
-```
-
-### A5: Run-Length Encoding (Town)
-
-When `--rle-town` is enabled, the engine builds run metadata over the final in-memory row order:
-
-- `town_run_value[k]` / `town_run_value_encoded[k]`
-- `town_run_start[k]`
-- `town_run_length[k]`
-
-At query time, the engine jumps directly to runs for requested towns and skips non-target runs. This is most effective with A2 because town values become long contiguous regions.
-
-Complexity summary:
-
-- Build: $O(N)$
-- Space: $O(R)$ where $R$ is number of runs
-- Town-filter stage: from row-level $O(N)$ checks to run-level pruning plus interval scan
-
-Console output during a run looks like:
-
-```
-Matriculation number : A5656567B
-Target year  : 2017
-Start month  : 6
-Target towns : JURONG WEST, PASIR RIS, TAMPINES
----------------------------------------------------
-Data Ingestion Complete:
-  File           : ResalePricesSingapore.csv
-  Lines read     : 192135 (excl. header)
-  Records loaded : 192135
-  Records skipped: 0
----------------------------------------------------
-Total records in column store: 192135
-Output written to : ScanResult_A5656567B.csv
-Valid (x,y) pairs : 47
-Done.
-```
-
----
-
-## Optimisation Flags (CLI)
-
-Run with one or more flags:
+### With optimisation flags
 
 ```bash
 ./column_store <MatriculationNumber> [flags...]
 ```
 
-Common flags:
+Flags can be combined in any order. Example:
 
-- `--dict-encoding` (A1)
-- `--bitmap-index-town` (B2)
-- `--presort-storage` (A2)
-- `--month-bsearch` (B3)
-- `--zone-maps` (B1)
-- `--precompute-ppsm` (A4)
-- `--int-multiply` (C6)
-- `--predicate-reorder` (C4)
-- `--late-materialise` (C3)
-- `--reuse` (C1/C2)
-- `--columnar-files` (A9)
+```bash
+./column_store U2220136J --dict-encoding --reuse
+```
+
+The program will:
+
+1. Derive query parameters from the matriculation number.
+2. Load `ResalePricesSingapore.csv` into the column store (applying any storage-layer flags).
+3. Run all 568 `(x, y)` queries.
+4. Write valid results to `ScanResult_U2220136J.csv`.
 
 ---
 
-## Evaluation Suite Usage
+## Optimisation Flags
 
-If you have built the eval suite using the commands above, run from the `Project` directory:
+Every optimisation is independently toggleable via a boolean flag. The table below lists all runtime flags accepted by `./column_store`:
+
+### Encoding Layer
+
+| Flag | ID | Description |
+|------|----|-------------|
+| `--dict-encoding` | A1 | Dictionary-encode Town, Flat_Type, Flat_Model, Street_Name. Replaces string comparisons with `uint16_t` integer comparisons. |
+| `--precompute-ppsm` | A4 | Pre-compute `Resale_Price / Floor_Area` at load time into a parallel `double` column. Eliminates per-query floating-point division. |
+
+### Physical Layout
+
+| Flag | ID | Description |
+|------|----|-------------|
+| `--presort-storage` | A2 | Sort all columns by (Town, Year, Month) after ingestion. Enables partition metadata and is a prerequisite for B3 and A5. |
+| `--columnar-files` | A9 | Load from pre-written binary `.col` files instead of CSV. Reduces load time from ~2.5s to ~25ms. Requires a prior `--write-columns` run. |
+| `--town-partitioning` | E1 | Load only the target towns' subdirectories from partitioned column files. Requires a prior `--write-columns-partitioned` run with A2 enabled. |
+
+### Indexing
+
+| Flag | ID | Description |
+|------|----|-------------|
+| `--zone-maps` | B1 | Build per-chunk (min, max) metadata for Year, Month, Floor_Area. Skips entire 1024-row chunks that cannot satisfy query predicates. |
+| `--bitmap-index-town` | B2 | Build a per-row bitmap mask for Town membership. Eliminates per-row Town string/int comparisons at query time. |
+| `--month-bsearch` | B3 | Use binary search on the linearised month key within each town partition. Requires `--presort-storage`. |
+| `--rle-town` | A5 | Build run-length encoding metadata over the Town column. At query time, skip entire non-target runs instead of row-by-row checks. Most effective with `--presort-storage`. |
+
+### Scan-Path Optimisations
+
+| Flag | ID | Description |
+|------|----|-------------|
+| `--reuse` | C1/C2 | Build a cumulative min-PPSM table in a single O(N) pass. All 568 queries become O(1) lookups. **Headline optimisation: 749× query speedup.** |
+| `--late-materialise` | C3 | Defer loading of display-only columns (Block, Flat_Model, Street_Name) until a query result is confirmed. |
+| `--predicate-reorder` | C4 | Evaluate Town predicate before Year/Month. **Negative result: 0.06× — rejected.** |
+| `--int-multiply` | C6 | Integer early-exit gate: skip floating-point PPSM computation when `price > 4725 × area`. |
+
+### I/O Layer
+
+| Flag | ID | Description |
+|------|----|-------------|
+| `--mmap-io` | D2 | Use POSIX `mmap(2)` instead of `ifstream` for column file loading. Requires `--columnar-files`. |
+
+### Utility Flags (Data Preparation)
+
+| Flag | Description |
+|------|-------------|
+| `--write-columns` | Ingest CSV, then write binary `.col` files to `data/columns*/` and exit. Used to prepare files for `--columnar-files`. |
+| `--write-columns-partitioned` | Same as above, but writes one subdirectory per town. Used to prepare files for `--town-partitioning`. Requires `--presort-storage`. |
+
+---
+
+## Recommended Configurations
+
+These configurations represent the best-performing paths discovered through our evaluation:
+
+### Fastest total time (mmap + result reuse)
+
+```bash
+# Preparation (run once):
+./column_store U2220136J --dict-encoding --precompute-ppsm --presort-storage --write-columns
+
+# Query (71.9 ms total):
+./column_store U2220136J --dict-encoding --reuse --columnar-files --mmap-io
+```
+
+### Fastest query time (partition pruning + result reuse)
+
+```bash
+# Preparation (run once):
+./column_store U2220136J --dict-encoding --precompute-ppsm --presort-storage --write-columns-partitioned
+
+# Query (0.7 ms query, 73.1 ms total — 3,389× query speedup):
+./column_store U2220136J --dict-encoding --reuse --town-partitioning
+```
+
+### Best without pre-written files (CSV-only, no preparation step)
+
+```bash
+# 749× query speedup, single command:
+./column_store U2220136J --dict-encoding --reuse
+```
+
+### Alternative scan-elimination path (pre-sort + binary search)
+
+```bash
+# 193× query speedup via binary search instead of result reuse:
+./column_store U2220136J --presort-storage --month-bsearch
+```
+
+### RLE town skipping path
+
+```bash
+# 10.5× standalone; 180× when combined with binary search:
+./column_store U2220136J --presort-storage --rle-town --month-bsearch
+```
+
+---
+
+## Evaluation Suite
+
+The evaluation suite benchmarks 50+ optimisation configurations, verifies correctness (byte-identical output) against baseline, and produces a detailed performance report.
+
+### Building and running
+
+```bash
+# Using Make (builds and runs automatically):
+make eval
+
+# Or manually:
+g++ -std=c++17 -Wall -Wextra -Iinclude \
+    eval/eval_suite.cpp src/column_store.cpp src/csv_parser.cpp \
+    src/query_engine.cpp src/output_writer.cpp src/column_file_io.cpp \
+    -o eval_runner
+
+./eval_runner ../data/ResalePricesSingapore.csv U2220136J 5
+```
+
+### Usage
 
 ```bash
 ./eval_runner <path_to_csv> <MatriculationNumber> [num_runs=5] [output_file]
 ```
 
-Note that `make eval` will build the eval suite and run it automatically for 5 runs.
+| Argument | Description |
+|----------|-------------|
+| `path_to_csv` | Path to `ResalePricesSingapore.csv` |
+| `MatriculationNumber` | Matric number to derive query parameters |
+| `num_runs` | Number of benchmark iterations per configuration (default: 5) |
+| `output_file` | Custom output filename (default: `EvalResult_<Matric>.txt` in `results/`) |
 
-Examples:
+### Output
 
-```bash
-# default output file: /results/EvalResult_A5656567B.txt
-./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5
+The suite writes results to both the terminal and a file in `results/`. The report includes:
 
-# custom output file name: /results/mycustom67file.txt
-./eval_runner ../data/ResalePricesSingapore.csv A5656567B 5 mycustom67file.txt
-```
+- **Performance table** with load time, query time, total time, speedup, rows scanned, town comparisons, memory usage, and correctness status for each configuration.
+- **Delta analysis** comparing each configuration against baseline.
+- **Dictionary encoding stats**, **zone map stats**, **bitmap index stats**, and **RLE stats** where applicable.
+- **Correctness verification**: every configuration's output is compared row-by-row against baseline. Exit code `0` = all correct, `1` = at least one mismatch.
 
-Notes:
+### Interpreting the results
 
-- The suite now writes the full report to file **and** prints progress to terminal.
-- Exit code `0` means all configurations matched baseline correctness.
-- Exit code `1` means at least one configuration failed correctness.
-
-### How to interpret the evaluation results
-
-```sh
-Configuration                      Load (ms)    Query (ms)    Total (ms)       Speedup  Rows Scanned     Town Cmps     Rows Pass   Valid (x,y)        Memory
-------------------------------------------------------------------------------------------------------------------------------------------------------------
-Baseline                               762.3      1214.695        1977.0         1.00x       147.25M        12.55M        308.9K           568       73.2 MB
-C1+C2: Result Reuse                    839.2         2.471         841.6       491.58x        259.2K         12.5K             0           568       73.2 MB
-A9+A2+B3: ColFile+Presort+MonthBSearch          20.4       115.724         136.1        10.50x        751.7K             0        308.9K           568        2.7 MB
-```
-
-The `Speedup` column in the performance table is currently **query-phase speedup**:
-
-$$
-  ext{Query Speedup} = \frac{\text{Baseline Query Time}}{\text{Config Query Time}}
-$$
-
-This is useful, but it does **not** include data loading/setup cost.
-
-For end-to-end comparison, also compute:
-
-$$
-  ext{Overall Speedup} = \frac{\text{Baseline Total Time}}{\text{Config Total Time}}
-$$
-
-#### Example 1: `C1+C2` (Result Reuse)
-
-- Query speedup shown in table: **491.58x**
-  - Baseline query: `1214.695 ms`
-  - `C1+C2` query: `2.471 ms`
-- Overall speedup (using total):
-  - Baseline total: `1977.0 ms`
-  - `C1+C2` total: `841.6 ms`
-  - Overall: $1977.0 / 841.6 \approx 2.35\text{x}$
-
-Interpretation: excellent query acceleration, but total gain is smaller because load/setup still costs time.
-
-#### Example 2: `A9+A2+B3` (Column Files + Presort + Month Binary Search)
-
-- Query speedup shown in table: **10.50x**
-  - Baseline query: `1214.695 ms`
-  - `A9+A2+B3` query: `115.724 ms`
-- Overall speedup (using total):
-  - Baseline total: `1977.0 ms`
-  - `A9+A2+B3` total: `136.1 ms`
-  - Overall: $1977.0 / 136.1 \approx 14.53\text{x}$
-
-Interpretation: this strategy improves both load and query time, so overall speedup is very strong.
-
-#### Most essential statistics to report
-
-When comparing configurations, prioritize these columns:
-
-1. **Total (ms)** : primary end-to-end metric.
-2. **Load (ms)** and **Query (ms)** : explains where gains/losses come from.
-3. **Rows Scanned** and **Town Cmps** : confirms pruning/filter efficiency.
-4. **Memory** : checks space-performance tradeoff.
-5. **Valid (x,y)** : must match baseline (correctness guard).
-
-Practical rule: pick the configuration with the best **Total (ms)** among those with identical correctness.
+The `Speedup` column reports **query-phase speedup**: `Baseline_Query_ms / Config_Query_ms`. For end-to-end comparison, compute `Baseline_Total_ms / Config_Total_ms`. The two can diverge significantly — for example, C1+C2 achieves 813× query speedup but only ~1.7× total speedup because load time dominates. Conversely, A9 (columnar files) has modest query speedup but dramatically reduces load time, yielding strong total speedup.
 
 ---
 
-## How Query Parameters Are Derived
+## Query Parameter Derivation
 
-Given a matriculation number (e.g. `A5656567B`), the program extracts the following:
+Given a matriculation number (e.g. `U2220136J`):
 
 ### Target Year
 
-The **last digit** of the matric number maps to a year:
+The **last digit** maps to a year:
 
-| Last digit | 0    | 1    | 2    | 3    | 4    | 5    | 6    | 7    | 8    | 9    |
-| ---------- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |
-| Year       | 2020 | 2021 | 2022 | 2023 | 2024 | 2015 | 2016 | 2017 | 2018 | 2019 |
-
-> Note: 2025 is excluded as a target year per the project specification (it is used for querying only).
+| Digit | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|-------|---|---|---|---|---|---|---|---|---|---|
+| Year | 2020 | 2021 | 2022 | 2023 | 2024 | 2015 | 2016 | 2017 | 2018 | 2019 |
 
 ### Start Month
 
-The **second-last digit** of the matric number is the commencing month. `0` maps to October (month 10).
+The **second-last digit** is the commencing month. `0` maps to month 10 (October).
 
 ### Town List
 
-Every **unique digit** in the full matric number maps to a town via Table 1:
+Every **unique digit** in the full matric number maps to a town:
 
-| Digit | Town          | Digit | Town        |
-| ----- | ------------- | ----- | ----------- |
-| 0     | BEDOK         | 5     | JURONG WEST |
-| 1     | BUKIT PANJANG | 6     | PASIR RIS   |
-| 2     | CLEMENTI      | 7     | TAMPINES    |
-| 3     | CHOA CHU KANG | 8     | WOODLANDS   |
-| 4     | HOUGANG       | 9     | YISHUN      |
+| Digit | Town | Digit | Town |
+|-------|------|-------|------|
+| 0 | BEDOK | 5 | JURONG WEST |
+| 1 | BUKIT PANJANG | 6 | PASIR RIS |
+| 2 | CLEMENTI | 7 | TAMPINES |
+| 3 | CHOA CHU KANG | 8 | WOODLANDS |
+| 4 | HOUGANG | 9 | YISHUN |
 
-**Example** — `A5656567B`:
-
-- Last digit `7` → year **2017**
-- Second-last digit `6` → start month **June (6)**
-- Unique digits `{5, 6, 7}` → towns **JURONG WEST, PASIR RIS, TAMPINES**
+**Our matric `U2220136J`:** last digit `6` → year **2016**, second-last `3` → start month **March**, unique digits `{0, 1, 2, 3, 6}` → towns **{BEDOK, BUKIT PANJANG, CLEMENTI, CHOA CHU KANG, PASIR RIS}**.
 
 ---
 
 ## Output Format
 
-Results are written to `ScanResult_<MatricNum>.csv`. Only valid `(x, y)` pairs (minimum price per sqm ≤ 4725) are included. Rows are ordered by ascending `x`, then ascending `y`.
+Results are written to `ScanResult_<MatricNum>.csv`. Only valid `(x, y)` pairs (minimum PPSM ≤ 4725) are included, ordered by ascending `x` then ascending `y`.
 
 ```
 (x, y),Year,Month,Town,Block,Floor_Area,Flat_Model,Lease_Commence_Date,Price_Per_Square_Meter
-(1, 80),2017,06,TAMPINES,274,105,New Generation,1985,3847
-(1, 81),2017,06,TAMPINES,274,105,New Generation,1985,3847
+(1, 80),2016,03,CHOA CHU KANG,701,109,Model A,1995,3028
+(1, 81),2016,03,CHOA CHU KANG,701,109,Model A,1995,3028
 ...
 ```
 
-| Field                    | Description                                          |
-| ------------------------ | ---------------------------------------------------- |
-| `(x, y)`                 | The query pair                                       |
-| `Year`                   | Year of the matched record (`YYYY`)                  |
-| `Month`                  | Month of the matched record (`MM`, zero-padded)      |
-| `Town`                   | Town of the matched flat                             |
-| `Block`                  | Block identifier                                     |
-| `Floor_Area`             | Floor area in m²                                     |
-| `Flat_Model`             | Flat model (e.g. Standard, Improved, New Generation) |
-| `Lease_Commence_Date`    | Year the lease began                                 |
-| `Price_Per_Square_Meter` | Minimum price per m², rounded to the nearest integer |
+| Field | Format | Description |
+|-------|--------|-------------|
+| `(x, y)` | `(int, int)` | The query pair |
+| `Year` | `YYYY` | Year of the matched record |
+| `Month` | `MM` | Month, zero-padded (e.g. `03`) |
+| `Town` | string | Town name |
+| `Block` | string | Block identifier |
+| `Floor_Area` | int | Floor area in m² |
+| `Flat_Model` | string | e.g. Standard, Improved, Model A |
+| `Lease_Commence_Date` | `YYYY` | Year the lease began |
+| `Price_Per_Square_Meter` | int | Minimum PPSM, rounded to nearest integer |
 
 ---
 
 ## Error Handling
 
-| Situation                             | Behaviour                                          |
-| ------------------------------------- | -------------------------------------------------- |
-| Input file not found                  | Prints an error message and exits with code `1`    |
-| Input file is empty                   | Prints an error message and exits with code `1`    |
-| Row has wrong number of fields        | Row is skipped; warning printed to `stderr`        |
-| Mandatory numeric field is empty      | Row is skipped; warning printed to `stderr`        |
-| Field fails numeric conversion        | Row is skipped; warning printed to `stderr`        |
-| Output file cannot be opened          | Prints an error message and exits with code `1`    |
-| No records match an `(x, y)` query    | That `(x, y)` pair is silently omitted from output |
-| Matric number has fewer than 2 digits | Prints an error message and exits with code `1`    |
+| Situation | Behaviour |
+|-----------|-----------|
+| Input CSV not found | Error message, exit code 1 |
+| Input CSV is empty | Error message, exit code 1 |
+| Row has wrong number of fields | Row skipped, warning to `stderr` |
+| Mandatory numeric field is empty | Row skipped, warning to `stderr` |
+| Field fails numeric conversion | Row skipped, warning to `stderr` |
+| Output file cannot be opened | Error message, exit code 1 |
+| No records match an `(x, y)` query | That pair is silently omitted from output |
+| Matric number has fewer than 2 digits | Error message, exit code 1 |
+| Column file missing (A9/E1) | Auto-generated from CSV on first run |
+| `--month-bsearch` without `--presort-storage` | Falls back to linear scan (no error) |
+| `--rle-town` without `--presort-storage` | Works correctly but with limited speedup; warning printed |
