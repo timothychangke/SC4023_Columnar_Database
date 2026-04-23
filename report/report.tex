@@ -205,13 +205,13 @@
 \noindent\textbf{Abstract.}~%
 We present our highly performant columnar store query engine.
 It implements \textbf{15 distinct optimisations}, spanning five architectural layers.
-They include encoding (Dictionary, Precomputed aggregates, RLE town compression), Physical layout (Pre-sorted clustering, Per-column binary files, Town partitioning), Indexing (Zone maps, Bitmap indices, Binary search), Scan-path rewriting (Result reuse, Late materialisation, Predicate reordering, Integer gating), and I/O management (Chunked streaming, Memory-mapped I/O).
+They include encoding (Dictionary, Precomputed aggregates), Physical layout (Pre-sorted clustering, Per-column binary files, Town partitioning, RLE town skipping), Indexing (Zone maps, Bitmap indices, Binary search), Scan-path rewriting (Result reuse, Late materialisation, Predicate reordering, Integer gating), and I/O management (Chunked streaming, Memory-mapped I/O).
 All optimisations are toggleable by boolean flags.
 This enables us to build a combinatorial evaluation suite testing across 40 permutations of optimisations, each with correctness verification.
 Physical town partitioning together with Result reuse achieves a \textbf{3,389$\times$ query speedup} at only 660\,KB memory.
-Memory-mapped I/O with Result Reuse has the fastest end to end time of \textbf{71.9\,ms}, 67.3$\times$ faster than baseline.
+Memory-mapped I/O with Result Reuse achieves the fastest end-to-end total time of \textbf{71.9\,ms}, a 67.3$\times$ total-time speedup vs. baseline (59.9$\times$ query speedup).
 Negative results are instructive as well.
-Bitmap indexing ($0.15\times$) and Predicate reordering ($0.06\times$) show that remove cheap predicates via an expensive process greatly affects performance, especially when data is already well filtered upstream.
+Bitmap indexing ($0.15\times$) and Predicate reordering ($0.06\times$) show that removing cheap predicates via an expensive process greatly affects performance, especially when data is already well filtered upstream.
 
 % ===================== SECTION 1: DATA STORAGE =====================
 \section{Data Storage}\label{sec:storage}
@@ -242,7 +242,7 @@ Bitmap indexing ($0.15\times$) and Predicate reordering ($0.06\times$) show that
 
   % ---- Parser ----
   \node[box, fill=parsecolor, minimum width=2.2cm, right=0.7cm of csv] (parser)
-    {\textbf{Parser}\\[-1pt]{\tiny date split, A1 dict}};
+    {\textbf{Parser}\\[-1pt]{\tiny date split, dictionary}};
 
   % ---- Column files: horizontal layout ----
   % Row 1: filter + derived (6 boxes side by side)
@@ -347,7 +347,7 @@ This eliminates repeated string parsings and allow for direct \texttt{uint16} ra
 Using just the Year predicate alone eliminates ${\sim}90\%$ of rows.
 
 \paragraph{Precomputed PricePerSqm.}
-The storing of \texttt{(price / area)} as \texttt{float32} will reduce the per-row floating point division we had to do for entries that survived the filter.
+The storing of \texttt{(price / area)} as \texttt{double} will reduce the per-row floating point division we had to do for entries that survived the filter.
 Only ${\sim}0.2\%$ of row iterations reach this division, the ${\sim}543$ survivors per query.
 This is why the measured speed up is only $<$0.1\%.
 
@@ -374,7 +374,7 @@ This replaces the per-row town predicate with a single array lookup.
 The mask uses one byte per row for cache line friendly sequential access.
 As explored in \S\ref{sec:negative}, this optimisation hurts performance.
 Eliminating all 12.55M Town comparisons yielded just $0.15\times$ throughput.
-Its overhead outweighted the cost of original comparisions as the Year predicate already filters out ${\sim}90\%$ of rows before Town is reached.
+Its overhead outweighed the cost of original comparisons as the Year predicate already filters out ${\sim}90\%$ of rows before Town is reached.
 
 \subsection{I/O Layer: Chunked and Memory-Mapped }\label{sec:io}
 
@@ -411,7 +411,7 @@ void loadColumnFilesPartitioned(const string& base_dir,
 
 For 3 target towns, only 42,935 of 259,237 rows are loaded, a 83.4\% reduction.
 If a row is in memory, it implicitly means that it must belong to a target town.
-No other town comparisions are then needed.
+No other town comparisons are then needed.
 Memory footprint also drops to \textbf{660\,KB}, which is 99.1\% less than baseline.
 
 \subsection{RLE on Sorted Towns}\label{sec:rle}
@@ -425,7 +425,7 @@ With pre-sorting, each town now forms a single contiguous run (26 runs total), a
 The strongest composition happens when including binary search techniques, which narrows each town partition to the target month range, and RLE eliminates all remaining town equality checks, yielding a 180$\times$ query speedup (13.7\,ms query time).
 
 \subsection{Exception Handling}\label{sec:except}
-In empty result sets, we return a ``No result'' row in our output.
+In empty result sets, we omit that $(x,y)$ pair from the output CSV.
 If there are ties in minimum price-per-sqm, the system only keeps the first one it sees during scans.
 
 \subsection{Space--Time Trade-off Summary}\label{sec:tradeoff-summary}
@@ -484,7 +484,7 @@ This composability allows the evaluation suite to test ${\sim}40$ configurations
 
 \subsection{Result Reuse}\label{sec:reuse}
 
-The 568 queries overlap: for fixed $y$, the month window for $x{=}k$ is a superset of $x{=}k{-}1$; for fixed $x$, every record with $\texttt{area} \ge y$ also satisfies $\texttt{area} \ge y{-}1$.
+The 568 queries overlap: for fixed $y$, the month window for $x{=}k$ is a superset of $x{=}k{-}1$; for fixed $x$, every record satisfying $\texttt{area} \ge y$ also satisfies $\texttt{area} \ge (y{-}1)$, so minima propagate from higher to lower thresholds.
 
 \paragraph{Three-step Cumulative Table Build.}
 \textbf{Step~1 (single $O(N)$ scan):} For each row passing year and town filters, compute $\textit{offset} = \texttt{month} - \textit{start} + 1$ (range 1--8) and $\textit{bucket} = \min(\texttt{area},\, 150)$.
@@ -528,7 +528,7 @@ Measured result: 0.7\% \emph{slowdown} (2,315\,ms vs.\ 2,299\,ms), essentially w
 \subsection{Other Scan Optimisations}\label{sec:other}
 
 \paragraph{Zone-map Chunk Skipping (\S\ref{sec:zonemaps}).}
-Before scanning a 1,024-row chunk, the engine tests its min/max against Year, Month, and Floor\_Area predicates; failing chunks are skipped entirely (96.1\% skip rate, 25\% standalone query speedup; combined with A1: 58\%).
+Before scanning a 1,024-row chunk, the engine tests its min/max against Year, Month, and Floor\_Area predicates; failing chunks are skipped entirely (96.1\% skip rate, 25\% standalone query speedup; combined with Dictionary Encoding: 58\%).
 
 \paragraph{Bitmap-driven Row Filtering (\S\ref{sec:bitmap}).}
 A precomputed \texttt{uint8\_t} mask replaces the per-row town loop with a single byte lookup.
@@ -560,7 +560,7 @@ Each optimisation preserves output equivalence:
 \textbf{Memory-mapped I/O}~\texttt{memcpy} from mapped region produces byte-identical vectors as \texttt{fread}.
 \textbf{RLE on Sorted Towns}~run boundaries mark contiguous blocks of identical town values; skipping a non-matching run is equivalent to skipping each row individually.
 \textbf{Physical Partitioning by Town}~partition loading concatenates disjoint town subsets; the union equals the set of rows matching the town predicate.
-All ${\sim}46$ configurations produced byte-identical output, verified by the evaluation suite's per-result hash comparison (\S\ref{sec:correct-inv}).
+All ${\sim}46$ configurations produced byte-identical output, verified by the evaluation suite's element-by-element output comparison (\S\ref{sec:correct-inv}).
 
 % ===================== SECTION 3: EXPERIMENT RESULT =====================
 \section{Experiment Result}\label{sec:experiment}
@@ -678,22 +678,22 @@ Table~\ref{tab:negative} isolates five such optimisations.
 \toprule
 Configuration & Query\,(ms) & $\Delta$ vs Baseline & Verdict \\
 \midrule
-\\textbf{Predicate Ordering}    & 37,584.1 & 0.06$\times$ & Rejected \\
-\\textbf{Bitmap Index on Town}    & 15,669.9 & 0.15$\times$ & Rejected \\
-\\textbf{Late Materialization}     &  2,315.5 & 0.99$\times$ & Within noise \\
-\\textbf{Precomputed PricePerSqm}      &  2,295.9 & 1.00$\times$ & Within noise \\
-\\textbf{Integer Early-Exit Gate}    &  2,298.4 & 1.00$\times$ & Within noise \\
+Predicate Ordering    & 37,584.1 & 0.06$\times$ & Rejected \\
+Bitmap Index on Town    & 15,669.9 & 0.15$\times$ & Rejected \\
+Late Materialization     &  2,315.5 & 0.99$\times$ & Within noise \\
+Precomputed PricePerSqm      &  2,295.9 & 1.00$\times$ & Within noise \\
+Integer Early-Exit Gate    &  2,298.4 & 1.00$\times$ & Within noise \\
 \bottomrule
 \end{tabular}
 \caption{Negative and neutral results (individual isolation).}\label{tab:negative}
 \end{table}
 
-\textbf{Bitmap Index on Town} is instructive alongside \textbf{Predicate Ordering}: both attempt to eliminate town comparisons, yet \textbf{Bitmap Index on Town} \emph{regressed} because the per-row byte-load adds branch overhead on all 147M row-visits, while A2+B3 avoids visiting non-target rows entirely.
+\textbf{Bitmap Index on Town} is instructive alongside \textbf{Predicate Ordering}: both attempt to eliminate town comparisons, yet \textbf{Bitmap Index on Town} \emph{regressed} because the per-row byte-load adds branch overhead on all 147M row-visits, while \textbf{Pre-sort + Binary Search} avoids visiting non-target rows entirely.
 \textbf{Late Materialization} produced a neutral result because deferring a 4-byte column on a narrow schema yields cache savings that roughly cancel against the overhead of maintaining a survivor index vector.
 
 \subsection{Sensitivity Analysis: Memory Budget of Memory-mapped I/O Path}\label{sec:sensitivity}
-Table~\ref{tab:d1} varies the D1 memory budget across a 50$\times$ range.
-All D1 configurations use A9 columnar files with A1, B1, and result reuse built into the batch runner.
+Table~\ref{tab:d1} varies the chunked-I/O memory budget across a 50$\times$ range.
+All \textbf{Chunked I/O} configurations use \textbf{Separate Binary Column Files} with \textbf{Dictionary Encoding}, \textbf{Zone Maps}, and \textbf{Result Reuse} built into the batch runner.
 
 \begin{table}[H]\centering\footnotesize
 \setlength{\tabcolsep}{3pt}
@@ -708,11 +708,10 @@ Budget & I/O Chunks & Query\,(ms) & Total\,(ms) & Q.Speedup \\
  1\,MB & 6 & 401.6 & 425.4 & 5.73$\times$ \\
 \bottomrule
 \end{tabular}
-\caption{D1 chunked I/O sensitivity. Total bytes read = 4.7\,MB at all budgets.}\label{tab:d1}
+\caption{Chunked-I/O sensitivity. Total bytes read = 4.7\,MB at all budgets.}\label{tab:d1}
 \end{table}
 
-Performance is stable from 50\,MB down to 2\,MB, degrading 7\% at the 1\,MB extreme where 6 I/O chunks are required.
-Byte-identical correctness is maintained at every budget.
+Performance is stable from 50\,MB down to 2\,MB; the 7\% degradation at 1\,MB confirms chunked I/O adds negligible overhead at this data scale.
 
 \subsection{Environment}\label{sec:env}
 All benchmarks were run on an Apple M-series MacBook Air, compiled with \texttt{clang++ -O2 -std=c++17}.
@@ -720,12 +719,11 @@ The dataset contains 259,237 rows across 10 columns; all 568 $(x,y)$ query pairs
 
 % ===================== CONCLUSION =====================
 \section{Conclusion}\label{sec:conclusion}
-The largest query-time win was \textbf{Result Reuse}: a single $O(N)$ build pass replaced $568 \times O(N)$ scans with $O(1)$ lookups (499$\times$ query speedup; 749$\times$ with A1).
-\textbf{Physical Town Partitioning} reduced the build-pass input from 259.2K to 42.9K rows, yielding 3{,}389$\times$ query speedup and 660\,KB memory---the most memory-efficient configuration.
-The fastest end-to-end configuration was \textbf{mmap + Result Reuse} at 71.9\,ms total (67.3$\times$), where \textbf{mmap's} 55\% load-time reduction composed with reuse's scan elimination.
+The largest query-time win was \textbf{Result Reuse}: a single $O(N)$ build pass replaced $568 \times O(N)$ scans with $O(1)$ lookups (499$\times$ query speedup; 749$\times$ with Dictionary Encoding).
+Physical Town Partitioning reduced the build-pass input from 259.2K to 42.9K rows (83.4\%), so Result Reuse's single $O(N)$ scan operated over 6$\times$ fewer rows; because these optimisations target orthogonal bottlenecks (row pruning vs. repeated scans), their gains compound to 3{,}389$\times$ at 660\,KB.
+The fastest end-to-end configuration was \textbf{Memory-mapped I/O + Result Reuse} at 71.9\,ms total (67.3$\times$ total-time speedup); once query time is near-zero, load time dominates, so mmap's 55\% load reduction has outsized impact.
 The most instructive failures were \textbf{Predicate Reordering} ($0.06\times$) and \textbf{Bitmap Index on Town} ($0.15\times$): \textbf{Predicate Reordering} demonstrated that optimal predicate order must minimise cost\,$\times$\,pass\_rate, while \textbf{Bitmap Index on Town} showed that eliminating a cheap predicate via a more expensive mechanism can regress performance when upstream predicates already prune effectively.
 Across all 15 optimisations and ${\sim}40$ tested configurations, every result was byte-identical to the baseline; correctness was never sacrificed for speed.
-If revisiting this project, we would explore a cost-based predicate optimiser that dynamically selects evaluation order.
 
 % ===================== APPENDIX =====================
 \section*{Appendix: Figures}
@@ -839,7 +837,7 @@ If revisiting this project, we would explore a cost-based predicate optimiser th
   \node[optbox, fill=iocol!60, minimum width=2.6cm, minimum height=0.40cm,
         below=0.45cm of io_chunk] (io_mmap) {\textbf{Memory-Mapped I/O}};
   \node[ann, below=1pt of io_mmap.south, anchor=north]
-    (io_mmap_ann) {\tiny mmap(2) + memcpy; 45\% faster};
+    (io_mmap_ann) {\tiny mmap(2) + memcpy; 55\% faster load};
 
   \node[ann, text=red!70!black, below=0.05cm of io_mmap_ann]
     (io_excl) {$\oplus$ mutually exclusive};
