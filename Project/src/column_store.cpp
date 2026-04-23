@@ -1,6 +1,4 @@
-/*
- * implementations for ColumnStore helpers
- */
+
 
 #include "column_store.h"
 #include <sys/mman.h>
@@ -53,7 +51,7 @@ void ColumnStore::buildTownRLE() {
     rows_skipped_by_rle = 0;
     rows_scanned_after_rle = 0;
 
-    std::cout << "A5 RLE town runs built: " << town_run_start.size()
+    std::cout << "RLE town runs built: " << town_run_start.size()
               << " runs over " << N << " rows\n";
 }
 

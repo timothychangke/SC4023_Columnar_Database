@@ -1,34 +1,4 @@
-/*
- * core in-memory column storage structure.
- *
- * Architecture:
- * every attribute in the resale price dataset gets its own vector.
- * we maintain strict parallel alignment so index i across all columns
- * always points to the same logical record.
- * 
- * this is the whole point of a column store. we dont have a Row object.
- * instead of: rows[i] = { year=2017, month=6, town="TAMPINES", price=420000 }
- * we do:
- * col_month_year[i] = 2017
- * col_month_month[i] = 6
- * col_town[i] = "TAMPINES"
- * col_resale_price[i] = 420000
- *
- * Data Type choices (trying to save memory here so we dont blow up the RAM):
- * col_month_year : uint16_t for 4 digit year (2 bytes instead of 4)
- * col_month_month: uint8_t since value is only 1 to 12
- * col_floor_area : uint16_t fits max area fine
- * col_lease_commence_date: uint16_t same reasoning as year
- * col_resale_price: uint32_t fits 1.5M SGD safely 
- * String columns : std::string, skip encoding for now just keep simple
- *
- * === OPTIMISATION: Dictionary Encoding (A1) ===
- * When enabled, string columns (Town, Flat_Type, Flat_Model, Street_Name)
- * are replaced with uint16_t integer IDs during CSV ingestion.
- * A DictionaryEncoder maintains the bidirectional mapping.
- * All downstream query comparisons become int==int instead of string==string.
- * Toggle: set ColumnStore::use_dict_encoding = true before calling loadCSV.
- */
+
 
 #pragma once
 
@@ -38,17 +8,7 @@
 #include <vector>
 #include <limits>
 
-/*
- * DictionaryEncoder
- * maps unique strings to compact uint16_t IDs and back.
- *
- * encode("TAMPINES") -> 0  (first call assigns ID 0)
- * encode("TAMPINES") -> 0  (subsequent calls return same ID)
- * decode(0)          -> "TAMPINES"
- *
- * max 65535 unique values per column which is more than enough 
- * for town (~26), flat_type (~7), flat_model (~20), street_name (~500).
- */
+
 struct DictionaryEncoder {
     std::unordered_map<std::string, uint16_t> str_to_id;
     std::vector<std::string>                  id_to_str;
@@ -89,11 +49,7 @@ struct DictionaryEncoder {
     }
 };
 
-/*
- * MinEntry
- * struct to hold the minimum ppsm and corresponding record index for a given (x,y) 
- * during the cumulative table building.
- */
+
 struct MinEntry { 
     bool has = false; 
     double ppsm = 0.0; 
@@ -106,8 +62,6 @@ struct TownPartition {
     bool valid = false;
 };
 
-
-// ─── Zone Map structures (B1) ───
 
 static constexpr std::size_t ZONE_CHUNK_SIZE = 1024; // rows per chunk
 
@@ -139,45 +93,18 @@ struct ZoneMap {
     std::size_t numChunks() const { return chunks.size(); }
 };
 
-/*
- * ColumnStore
- * main in memory db struct. 
- */
+
 struct ColumnStore {
 
-    // Dictionary encoding optimisation flag
-    // This is set to enable/disable dictionary encoding.
-    // When true, encoded int columns are populated instead, and dictionaries
-    // are built during ingestion. the original string columns are still populated
-    // so that output_writer can retrieve the original strings for the final CSV.
     bool use_dict_encoding = false;
 
-     // Intermediate result reuse flag 
-     // This is set to enable/disable the intermediate result reuse optimisation.
-    // When true, the buildCumulativeTable function is called after ingestion to
-    // precompute the cumulative min ppsm for all (x,y) combinations, and the
-    // runQuery function will read directly from this cumulative table instead of scanning the columns.
     bool use_reuse = false;
     std::vector<std::vector<MinEntry>> cum_table; // 2D container matrix to store precomputed cumulative min ppsm for all (x,y) combinations when reuse is enabled. 
 
-    // When true, col_price_per_sqm is populated during CSV ingestion.
-    // The query engine reads from this column directly instead of
-    // computing resale_price / floor_area on every row during scanning.
     bool use_precomputed_ppsm = false;
 
-    // When true, the 4725 threshold check uses:
-    //   price <= 4725 * area  (integer multiply)
-    // instead of:
-    //   price / area <= 4725.0  (floating-point division)
-    // This avoids FP division during the threshold check.
-    // NOTE: The final min-PPSM comparison still uses double to correctly
-    // break ties, but the threshold gate becomes integer-only.
     bool use_int_multiply = false;
 
-     // When true, the scan loop reorders filters so that Town (most selective,
-    // ~80% elimination) is checked first, before Year and Month.
-    // Baseline order:  Year → Month → Town → Area
-    // Optimised order: Town → Year → Month → Area
     bool use_predicate_reorder = false;
 
     // Pre-computed Price Per SqM (only populated when use_precomputed_ppsm=true)
@@ -185,9 +112,6 @@ struct ColumnStore {
     std::vector<double> col_price_per_sqm;
 
 
-    // Month originally "YYYY-MM", split it during ingestion
-    // so we dont keep doing expensive string parse during queries.
-    // note: dataset is not sorted by month 
     std::vector<uint16_t> col_month_year;   // eg 2017
     std::vector<uint8_t>  col_month_month;  // eg 6 for june
 
@@ -233,45 +157,19 @@ struct ColumnStore {
     DictionaryEncoder dict_flat_model;
     DictionaryEncoder dict_street_name;
 
-    // === B2: Bitmap Index on Town ===
-    // One bit-vector per town, one bit per row.
-    // Layout:
-    //   town_bitmaps[town_idx][row_idx] == true  <=>  row belongs to town_idx
-    //
-    // If A1 is enabled, town_idx is exactly the dictionary ID (col_town_encoded).
-    // If A1 is disabled, town_idx is resolved through town_bitmap_lookup.
-    //
-    // Trade-off:
-    //   + Fast town predicate evaluation via precomputed mask
-    //   - Extra memory O(num_towns * num_rows) bits
     bool use_bitmap_index_town = false;
     std::vector<std::vector<bool>> town_bitmaps;
     std::unordered_map<std::string, uint16_t> town_bitmap_lookup;
 
-    // B2 observability counters (updated by runQuery)
+    // observability counters (updated by runQuery)
     mutable std::size_t town_bitmap_lookups = 0;        // number of bitmap vectors OR-ed into masks
     mutable std::size_t town_bitmap_evaluations = 0;    // rows checked against town bitmap mask
     mutable std::size_t rows_eliminated_by_bitmap = 0;  // rows skipped by bitmap mask
 
-    // Zone map optimisation flag (B1)
-    // When true, zone maps are built during loadCSV for numeric columns.
-    // runQuery will skip entire chunks whose min/max range
-    // cannot satisfy the query predicates.
-    // Composes with: A1, C4, C6, A4 (all scan-path flags).
-    // Irrelevant when use_reuse is on (scan is bypassed entirely).
     bool use_zone_maps = false;
     
-    // Late materialisation (C3)
-    // When true, the scan loop's filter phase only accesses year, month,
-    // town, and floor_area columns. Resale_price (and col_price_per_sqm)
-    // are deferred to a second pass over surviving row indices only.
-    // Composes with: A1, A4, C4, C6, B1. Irrelevant when use_reuse is on.
     bool use_late_materialise = false;
 
-    // ── A9: Separate Binary Column Files ──
-    // When true, data is read from pre-written per-column binary files
-    // instead of parsing the CSV at runtime. Only filter columns loaded upfront;
-    // materialisation columns loaded lazily for the winning row only.
     bool use_columnar_files = false;
 
     // Path to the directory containing .col files
@@ -280,15 +178,6 @@ struct ColumnStore {
     // Row count (read from meta.col, used to pre-size vectors)
     std::size_t total_rows = 0;
     
-    // ── D1: Chunked I/O with memory budget ──
-    // When true, runAllQueriesChunked() streams filter columns off disk one
-    // chunk at a time instead of loading them all up front. Each chunk is
-    // sized so its filter columns fit inside memory_budget_bytes.
-    //
-    // Requires: use_columnar_files = true (depends on A9 .col files)
-    // Requires: use_dict_encoding = true  (sidesteps variable-width town.col)
-    // Composes with: B1, A1, C4, C6, A4, C3
-    // Incompatible with: use_reuse (reuse loads everything and bypasses scan)
     bool use_chunked_io = false;
 
     // User-facing memory budget in bytes. Default 50 MB.
@@ -302,25 +191,8 @@ struct ColumnStore {
     mutable std::size_t io_chunks_loaded = 0;
     mutable std::size_t io_bytes_read    = 0;
     
-    // ── D2: Memory-mapped I/O ──
-    // When true, column files are loaded via mmap(2) instead of fread.
-    // Eliminates read() syscall overhead; the OS demand-pages data on
-    // first access, enabling lazy paging for columns that are never touched.
-    //
-    // Requires: use_columnar_files = true (operates on .col files)
-    // Conflicts with: use_chunked_io (D1 is explicit bounded reads; D2 is
-    //   the opposite strategy — enabling both is incoherent)
-    // Composes with: A1, A2, A4, B1, B3, C1+C2, C3, C4, C6
     bool use_mmap_io = false;
 
-    // ── E1: Physical Partitioning by Town ──
-    // When true, column files are split into one subdirectory per town.
-    // At query time, only the partition directories matching the target
-    // towns are loaded, eliminating the Town predicate entirely.
-    //
-    // Requires: use_columnar_files = true (partitioning is a file-layout opt)
-    // Synergises with: A1 (partition by town_id), A2 (town-contiguous order)
-    // Composes with: B1 (zone maps per partition), C3, D2
     bool use_town_partitioning = false;
 
     // When town_partitioning is active, this records which partition dirs
@@ -344,9 +216,6 @@ struct ColumnStore {
     ZoneMap zm_month_year;       // used for: year == target_year
     ZoneMap zm_month_month;      // used for: month in [start, end]
 
-    // === A2: Pre-sorted Storage (Town, then Year/Month) ===
-    // Reorders all columns with one shared permutation so row alignment is preserved.
-    // This makes each town contiguous and month-ordered inside that town partition.
     bool use_presorted_storage = false;
 
     // Town partition metadata generated when use_presorted_storage is enabled.
@@ -355,19 +224,13 @@ struct ColumnStore {
     // dictionary path (index = town_id)
     std::vector<TownPartition> town_partitions_encoded;
 
-    // === B3: Sorted Index on Month (Binary Search) ===
-    // When enabled together with use_presorted_storage, query execution uses
-    // binary search over month range within each town partition.
     bool use_month_binary_search = false;
 
-    // === A5: Run-Length Encoding on Town ===
-    // Build run markers on the final in-memory row order.
-    // Best benefit when combined with A2 (long contiguous town runs).
     bool use_rle_town = false;
 
-    // Dictionary mode run values (preferred when A1 is enabled)
+    // Dictionary mode run values 
     std::vector<uint16_t> town_run_value_encoded;
-    // String mode run values (fallback when A1 is disabled)
+    // String mode run values 
     std::vector<std::string> town_run_value;
 
     // Run boundaries: run k covers [town_run_start[k], town_run_start[k] + town_run_length[k])
@@ -378,7 +241,7 @@ struct ColumnStore {
     std::unordered_map<uint16_t, std::vector<uint32_t>> town_to_runs_encoded;
     std::unordered_map<std::string, std::vector<uint32_t>> town_to_runs;
 
-    // A5 observability counters (updated during query execution)
+    // observability counters (updated during query execution)
     mutable uint64_t town_runs_scanned = 0;
     mutable uint64_t rows_skipped_by_rle = 0;
     mutable uint64_t rows_scanned_after_rle = 0;
@@ -388,8 +251,8 @@ struct ColumnStore {
     // return total records stored 
     std::size_t size() const;
 
-    // (Re)build the B2 town bitmap index from current row order.
-    // Must be called after any row reordering (e.g. A2 presort).
+    // (Re)build the town bitmap index from current row order.
+    // Must be called after any row reordering 
     void rebuildTownBitmaps();
     
     // Build town run-length metadata from current row order.

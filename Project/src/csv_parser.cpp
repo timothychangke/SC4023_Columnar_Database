@@ -1,19 +1,4 @@
-/*
- * implementations for csv parsing and ingestion.
- *
- * NOTE for whoever takes over this:
- * The data.gov.sg dataset actually has 11 columns now, not 10.
- * They added "remaining_lease" at index 9 recently. We DONT need it for our query.
- *
- * So now we parse the header dynamically to find the correct column index.
- * Dont hardcode the column positions anymore la.
- *
- * OPTIMISATION: Dictionary Encoding
- * When db.use_dict_encoding is true, during ingestion we additionally populate
- * encoded uint16_t columns for Town, Flat_Type, Flat_Model, Street_Name.
- * Each unique string gets a compact integer ID via DictionaryEncoder.
- * The original string columns are still populated (needed for final output).
- */
+
 
 #include "csv_parser.h"
 
@@ -264,9 +249,6 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
             db.col_flat_model.push_back(fields[COL_MODEL]);
             db.col_storey_range.push_back(fields[COL_STOREY]);
 
-            // OPTIMISATION: Dictionary Encoding 
-            // when enabled, also encode string columns as integer IDs.
-            // this lets the query engine compare ints instead of strings.
             if (db.use_dict_encoding) {
                 db.col_town_encoded.push_back(
                     db.dict_town.encode(fields[COL_TOWN]));
@@ -402,24 +384,21 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
             }
         }
 
-        std::cout << "A2 pre-sort complete: records sorted by Town->Year->Month.\n";
+        std::cout << "pre-sort complete: records sorted by Town->Year->Month.\n";
         std::cout << "  Town partitions built: " << db.town_partitions.size() << "\n";
     }
 
-    // === A5: Town Run-Length Encoding ===
-    // Build on FINAL in-memory order (after A2 reorder, if any).
+    // === Town Run-Length Encoding ===
+    // Build on FINAL in-memory order 
     if (db.use_rle_town) {
         if (!db.use_presorted_storage) {
-            std::cout << "[A5] Warning: --rle-town enabled without A2 pre-sort. ";
+            std::cout << "Warning: --rle-town enabled without pre-sort. ";
         }
         db.buildTownRLE();
     }
 
     std::cout << "---------------------------------------------------\n";
 
-    // === B2: Town Bitmap Index ===
-    // Build after optional A2 reordering so bitmap row positions match
-    // the final physical row layout.
     if (db.use_bitmap_index_town) {
         db.rebuildTownBitmaps();
         std::cout << "Town bitmap index built: "
@@ -427,7 +406,6 @@ std::size_t loadCSV(const std::string& filepath, ColumnStore& db) {
                   << db.size() << " rows\n";
     }
 
-    // === Zone Map Construction (B1) ===
     if (db.use_zone_maps) {
         const std::size_t N = db.size();
         const std::size_t num_chunks = (N + ZONE_CHUNK_SIZE - 1) / ZONE_CHUNK_SIZE;

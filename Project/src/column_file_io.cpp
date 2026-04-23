@@ -1,12 +1,4 @@
-/*
- * Separate Binary Column Files — I/O implementation.
- *
- * Purpose:
- *   - Write each ColumnStore column as its own binary file (one-time conversion)
- *   - Load only the filter columns needed for query scanning (selective read)
- *   - Lazy load materialisation columns for just the winning row (random access)
 
- */
 
 #include "column_file_io.h"
 
@@ -36,12 +28,7 @@ void writeDictionary(std::ofstream& f, const DictionaryEncoder& dict) {
     }
 }
 
-/*
- * readDictionary
- * Deserialise a DictionaryEncoder from a binary stream.
- * Reconstructs both id_to_str and str_to_id with the same ID assignments
- * that were used during writing.
- */
+
 void readDictionary(std::ifstream& f, DictionaryEncoder& dict) {
     dict.clear();
 
@@ -72,7 +59,7 @@ static void writeMeta(const ColumnStore& db, const std::string& filepath) {
     f.write(reinterpret_cast<const char*>(&N), sizeof(N));
 
     // flags byte: encode which optional columns are present
-    // bit 0 = dict_encoding (A1), bit 1 = precomputed_ppsm (A4)
+    // bit 0 = dict_encoding, bit 1 = precomputed_ppsm 
     uint8_t flags = 0;
     if (db.use_dict_encoding)    flags |= 0x01;
     if (db.use_precomputed_ppsm) flags |= 0x02;
@@ -130,10 +117,6 @@ void writeColumnFiles(const ColumnStore& db, const std::string& dir) {
                 vec.size() * sizeof(vec[0]));
     };
 
-    // ── Helper lambda: write a variable-length string column ──
-    // Format: [uint32_t row_count]
-    //         [uint32_t offset_table[row_count + 1]]
-    //         [char[] packed_strings]
     auto writeStringCol = [&](const std::vector<std::string>& col,
                               const std::string& name) {
         std::ofstream f(dir + "/" + name, std::ios::binary);
@@ -269,7 +252,7 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
     readNumericCol(db.col_floor_area,   "floor_area.col");
     readNumericCol(db.col_resale_price, "resale_price.col");
 
-    // Town column: load either the encoded version (A1) or the raw string version
+    // Town column: load either the encoded version or the raw string version
     if (db.use_dict_encoding) {
         readNumericCol(db.col_town_encoded, "town_encoded.col");
         // dictionaries were already restored by readMeta()
@@ -278,14 +261,11 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
         readStringCol(db.col_town, dir + "/town.col");
     }
 
-    // Precomputed PPSM (A4): only load if the flag is on
+    // Precomputed PPSM: only load if the flag is on
     if (db.use_precomputed_ppsm) {
         readNumericCol(db.col_price_per_sqm, "price_per_sqm.col");
     }
 
-    // A2: rebuild town partitions from loaded columns.
-    // Column files may be pre-sorted (Town -> Year -> Month); when they are,
-    // this metadata enables the A2+B3 fast path in runQuery().
     db.town_partitions.clear();
     db.town_partitions_encoded.clear();
     if (db.use_presorted_storage) {
@@ -318,16 +298,12 @@ void loadColumnFiles(const std::string& dir, ColumnStore& db) {
 
     if (db.use_rle_town) {
         if (!db.use_presorted_storage) {
-            std::cout << "[A5] Warning: --rle-town enabled without A2 pre-sort. "
+            std::cout << "Warning: --rle-town enabled without pre-sort. "
                          "Correctness is unchanged, but speedup may be limited.\n";
         }
         db.buildTownRLE();
     }
 
-    // ── Materialisation columns are NOT loaded here ──
-    // block, flat_model, lease_commence_date, street_name, flat_type,
-    // storey_range will be loaded lazily for just the winning row index
-    // via loadStringAt() / loadUint16At().
 
     std::cout << "Column files loaded: " << N << " rows from " << dir << "\n";
 
@@ -456,9 +432,6 @@ uint16_t loadUint16At(const std::string& filepath, std::size_t idx) {
     return value;
 }
 
-// ============================================================================
-// D1: Chunked I/O helpers
-// ============================================================================
 
 std::size_t computeIOChunkRows(std::size_t memory_budget_bytes,
                                bool        dict_encoding,
@@ -470,7 +443,7 @@ std::size_t computeIOChunkRows(std::size_t memory_budget_bytes,
     bytes_per_row += sizeof(uint16_t);   // col_floor_area
     bytes_per_row += sizeof(uint32_t);   // col_resale_price
 
-    // D1 requires dict encoding → town column is uint16_t per row.
+    // Chunked I/O requires dict encoding → town column is uint16_t per row.
     // (Without dict encoding we'd need variable-width string seeks.)
     if (dict_encoding) {
         bytes_per_row += sizeof(uint16_t);
@@ -490,15 +463,12 @@ std::size_t computeIOChunkRows(std::size_t memory_budget_bytes,
 
     std::size_t rows = usable_budget / bytes_per_row;
 
-    // Lower bound aligned with ZONE_CHUNK_SIZE so B1 zone maps have
+    // Lower bound aligned with ZONE_CHUNK_SIZE so zone maps have
     // something to prune at.
     if (rows < ZONE_CHUNK_SIZE) rows = ZONE_CHUNK_SIZE;
     return rows;
 }
 
-// Helper: read a fixed-width numeric column range into a vector.
-// Matches writeNumericCol's on-disk format:
-//   [uint32_t row_count] [T × row_count]
 template <typename T>
 static std::size_t readNumericRange(const std::string& filepath,
                                     std::size_t        chunk_start,
@@ -543,7 +513,7 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
     readNumericRange<uint32_t>(dir + "/resale_price.col",
                                chunk_start, chunk_rows, db.col_resale_price);
 
-    // D1 requires dict encoding → town_encoded.col is a uint16_t column.
+    // Chunked I/O requires dict encoding → town_encoded.col is a uint16_t column.
     if (db.use_dict_encoding) {
         readNumericRange<uint16_t>(dir + "/town_encoded.col",
                                    chunk_start, chunk_rows, db.col_town_encoded);
@@ -573,9 +543,6 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
     return n;
 }
 
-// ============================================================================
-// D2: Memory-mapped I/O
-// ============================================================================
 
 // Helper: mmap a file and register the region in db.mmap_regions for cleanup.
 // Returns pointer to the mapped data (past the uint32_t row-count header).
@@ -585,13 +552,13 @@ static void* mmapColumnFile(const std::string& filepath,
                             ColumnStore&       db) {
     int fd = ::open(filepath.c_str(), O_RDONLY);
     if (fd < 0) {
-        throw std::runtime_error("D2 mmap: cannot open " + filepath);
+        throw std::runtime_error("mmap: cannot open " + filepath);
     }
 
     struct stat st;
     if (::fstat(fd, &st) != 0) {
         ::close(fd);
-        throw std::runtime_error("D2 mmap: fstat failed on " + filepath);
+        throw std::runtime_error("mmap: fstat failed on " + filepath);
     }
     const std::size_t file_size = static_cast<std::size_t>(st.st_size);
     const std::size_t header    = sizeof(uint32_t); // row count
@@ -599,13 +566,13 @@ static void* mmapColumnFile(const std::string& filepath,
 
     if (file_size < expected_size) {
         ::close(fd);
-        throw std::runtime_error("D2 mmap: file too small: " + filepath);
+        throw std::runtime_error("mmap: file too small: " + filepath);
     }
 
     void* addr = ::mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (addr == MAP_FAILED) {
         ::close(fd);
-        throw std::runtime_error("D2 mmap: mmap failed on " + filepath);
+        throw std::runtime_error("mmap: mmap failed on " + filepath);
     }
 
     // Verify row count in file header
@@ -614,7 +581,7 @@ static void* mmapColumnFile(const std::string& filepath,
     if (static_cast<std::size_t>(file_N) != expected_rows) {
         ::munmap(addr, file_size);
         ::close(fd);
-        throw std::runtime_error("D2 mmap: row count mismatch in " + filepath);
+        throw std::runtime_error("mmap: row count mismatch in " + filepath);
     }
 
     // Register for cleanup
@@ -648,7 +615,7 @@ void loadColumnFilesMmap(const std::string& dir, ColumnStore& db) {
     mmapNumericCol(db.col_floor_area,   "floor_area.col");
     mmapNumericCol(db.col_resale_price, "resale_price.col");
 
-    // Town: encoded (A1) or raw string
+    // Town: encoded or raw string
     if (db.use_dict_encoding) {
         mmapNumericCol(db.col_town_encoded, "town_encoded.col");
     } else {
@@ -669,12 +636,12 @@ void loadColumnFilesMmap(const std::string& dir, ColumnStore& db) {
         }
     }
 
-    // Precomputed PPSM (A4)
+    // Precomputed PPSM 
     if (db.use_precomputed_ppsm) {
         mmapNumericCol(db.col_price_per_sqm, "price_per_sqm.col");
     }
 
-    // Rebuild town partitions if pre-sorted (A2)
+    // Rebuild town partitions if pre-sorted 
     if (db.use_presorted_storage) {
         if (db.use_dict_encoding) {
             db.town_partitions_encoded.assign(db.dict_town.size(), TownPartition{});
@@ -736,7 +703,7 @@ std::string loadStringAtMmap(const std::string& filepath, std::size_t idx) {
     // This avoids the ifstream open/close overhead of the non-mmap path.
     int fd = ::open(filepath.c_str(), O_RDONLY);
     if (fd < 0) {
-        throw std::runtime_error("D2 loadStringAtMmap: cannot open " + filepath);
+        throw std::runtime_error("loadStringAtMmap: cannot open " + filepath);
     }
 
     struct stat st;
@@ -746,7 +713,7 @@ std::string loadStringAtMmap(const std::string& filepath, std::size_t idx) {
     void* addr = ::mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (addr == MAP_FAILED) {
         ::close(fd);
-        throw std::runtime_error("D2 loadStringAtMmap: mmap failed " + filepath);
+        throw std::runtime_error("loadStringAtMmap: mmap failed " + filepath);
     }
 
     const char* base = static_cast<const char*>(addr);
@@ -776,7 +743,7 @@ std::string loadStringAtMmap(const std::string& filepath, std::size_t idx) {
 uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
     int fd = ::open(filepath.c_str(), O_RDONLY);
     if (fd < 0) {
-        throw std::runtime_error("D2 loadUint16AtMmap: cannot open " + filepath);
+        throw std::runtime_error("loadUint16AtMmap: cannot open " + filepath);
     }
 
     struct stat st;
@@ -786,7 +753,7 @@ uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
     void* addr = ::mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (addr == MAP_FAILED) {
         ::close(fd);
-        throw std::runtime_error("D2 loadUint16AtMmap: mmap failed " + filepath);
+        throw std::runtime_error("loadUint16AtMmap: mmap failed " + filepath);
     }
 
     const char* base = static_cast<const char*>(addr);
@@ -806,13 +773,10 @@ uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
     return value;
 }
 
-// ============================================================================
-// E1: Town-Partitioned Column Files
-// ============================================================================
 
 void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_dir) {
     if (db.town_partitions.empty()) {
-        throw std::runtime_error("E1: town_partitions is empty — requires A2 (presorted storage)");
+        throw std::runtime_error("E1: town_partitions is empty — requires presorted storage");
     }
 
     std::filesystem::create_directories(base_dir);
@@ -898,10 +862,10 @@ void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_
         writeStringRange(db.col_flat_type,    begin, end, town_dir + "/flat_type.col");
         writeStringRange(db.col_storey_range, begin, end, town_dir + "/storey_range.col");
 
-        std::cout << "  [E1] Partition '" << town_name << "': " << (end - begin) << " rows\n";
+        std::cout << " Partition '" << town_name << "': " << (end - begin) << " rows\n";
     }
 
-    std::cout << "[E1] Partitioned column files written to: " << base_dir << "\n";
+    std::cout << " Partitioned column files written to: " << base_dir << "\n";
 }
 
 
@@ -932,7 +896,7 @@ void loadColumnFilesPartitioned(const std::string& base_dir,
         std::string town_dir = base_dir + "/" + town;
         std::ifstream test(town_dir + "/meta.col", std::ios::binary);
         if (!test.is_open()) {
-            std::cout << "  [E1] WARNING: partition not found for town '" << town << "', skipping.\n";
+            std::cout << "   WARNING: partition not found for town '" << town << "', skipping.\n";
             continue;
         }
         test.close();
@@ -986,13 +950,10 @@ void loadColumnFilesPartitioned(const std::string& base_dir,
             appendNumericCol(db.col_price_per_sqm, "price_per_sqm.col");
         }
 
-        // We still need town strings for lazy materialisation of winning row
-        // But we DON'T load them into the filter path — they're implicit.
-        // We store the partition dir so the query engine can lazy-load from it.
         db.loaded_partition_dirs.push_back(town_dir);
         db.total_rows += part_N;
 
-        std::cout << "  [E1] Loaded partition '" << town << "': " << part_N << " rows\n";
+        std::cout << "  Loaded partition '" << town << "': " << part_N << " rows\n";
         
         // Load materialisation columns so post-scan can index by best_i
         auto appendStringCol = [&](std::vector<std::string>& col, const std::string& name) {
@@ -1021,7 +982,7 @@ void loadColumnFilesPartitioned(const std::string& base_dir,
         appendNumericCol(db.col_lease_commence_date, "lease_commence_date.col");
     }
 
-    std::cout << "  [E1] Total rows loaded: " << db.total_rows
+    std::cout << "  Total rows loaded: " << db.total_rows
               << " from " << db.loaded_partition_dirs.size() << " partitions\n";
 
     // Rebuild zone maps if enabled

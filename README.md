@@ -50,10 +50,10 @@ Project/
 │   ├── csv_parser.h                # CSV ingestion declarations
 │   ├── query_engine.h              # QueryResult struct, runQuery, buildCumulativeTable
 │   ├── output_writer.h             # CSV output writer declaration
-│   └── column_file_io.h            # Binary column file I/O (A9), mmap (D2), partitioned I/O (E1)
+│   └── column_file_io.h            # Binary column file I/O, mmap, partitioned I/O 
 ├── src/
 │   ├── column_store.cpp            # ColumnStore::size(), ::clear(), memory estimation
-│   ├── csv_parser.cpp              # CSV parsing, A1 dict encoding, A2 pre-sorting, A4 PPSM, A5 RLE
+│   ├── csv_parser.cpp              # CSV parsing, dict encoding, pre-sorting, PPSM, RLE
 │   ├── query_engine.cpp            # Query parameter derivation, scan logic, all query-path optimisations
 │   ├── output_writer.cpp           # writeResults() — ScanResult CSV generation
 │   └── column_file_io.cpp          # Column file read/write, mmap, chunked I/O, partitioned files
@@ -93,7 +93,7 @@ Index `i` across every vector always refers to the same logical record.
 | Floor area | `uint16_t` | 2 B | Max ~200 m² |
 | Lease commence date | `uint16_t` | 2 B | 4-digit year |
 | Resale price | `uint32_t` | 4 B | Up to ~$1.5M SGD |
-| String columns | `std::string` | var | No encoding in baseline; A1 adds uint16 encoded columns |
+| String columns | `std::string` | var | No encoding in baseline; Dict encoding adds uint16 encoded columns |
 
 The source `Month` column (`"YYYY-MM"`) is **decomposed at ingestion** into two integer columns, eliminating repeated string parsing during scans.
 
@@ -173,42 +173,42 @@ Every optimisation is independently toggleable via a boolean flag. The table bel
 
 ### Encoding Layer
 
-| Flag | ID | Description |
-|------|----|-------------|
-| `--dict-encoding` | A1 | Dictionary-encode Town, Flat_Type, Flat_Model, Street_Name. Replaces string comparisons with `uint16_t` integer comparisons. |
-| `--precompute-ppsm` | A4 | Pre-compute `Resale_Price / Floor_Area` at load time into a parallel `double` column. Eliminates per-query floating-point division. |
+| Flag | Description |
+|------|-------------|
+| `--dict-encoding` | Dictionary-encode Town, Flat_Type, Flat_Model, Street_Name. Replaces string comparisons with `uint16_t` integer comparisons. |
+| `--precompute-ppsm` | Pre-compute `Resale_Price / Floor_Area` at load time into a parallel `double` column. Eliminates per-query floating-point division. |
 
 ### Physical Layout
 
-| Flag | ID | Description |
-|------|----|-------------|
-| `--presort-storage` | A2 | Sort all columns by (Town, Year, Month) after ingestion. Enables partition metadata and is a prerequisite for B3 and A5. |
-| `--columnar-files` | A9 | Load from pre-written binary `.col` files instead of CSV. Reduces load time from ~2.5s to ~25ms. Requires a prior `--write-columns` run. |
-| `--town-partitioning` | E1 | Load only the target towns' subdirectories from partitioned column files. Requires a prior `--write-columns-partitioned` run with A2 enabled. |
+| Flag | Description |
+|------|-------------|
+| `--presort-storage` | Sort all columns by (Town, Year, Month) after ingestion. Enables partition metadata and is a prerequisite for Binary Search and RLE Sort. |
+| `--columnar-files` | Load from pre-written binary `.col` files instead of CSV. Reduces load time from ~2.5s to ~25ms. Requires a prior `--write-columns` run. |
+| `--town-partitioning` | Load only the target towns' subdirectories from partitioned column files. Requires a prior `--write-columns-partitioned` run with Pre-Sort enabled. |
 
 ### Indexing
 
-| Flag | ID | Description |
-|------|----|-------------|
-| `--zone-maps` | B1 | Build per-chunk (min, max) metadata for Year, Month, Floor_Area. Skips entire 1024-row chunks that cannot satisfy query predicates. |
-| `--bitmap-index-town` | B2 | Build a per-row bitmap mask for Town membership. Eliminates per-row Town string/int comparisons at query time. |
-| `--month-bsearch` | B3 | Use binary search on the linearised month key within each town partition. Requires `--presort-storage`. |
-| `--rle-town` | A5 | Build run-length encoding metadata over the Town column. At query time, skip entire non-target runs instead of row-by-row checks. Most effective with `--presort-storage`. |
+| Flag | Description |
+|------|-------------|
+| `--zone-maps` | Build per-chunk (min, max) metadata for Year, Month, Floor_Area. Skips entire 1024-row chunks that cannot satisfy query predicates. |
+| `--bitmap-index-town` | Build a per-row bitmap mask for Town membership. Eliminates per-row Town string/int comparisons at query time. |
+| `--month-bsearch` | Use binary search on the linearised month key within each town partition. Requires `--presort-storage`. |
+| `--rle-town` | Build run-length encoding metadata over the Town column. At query time, skip entire non-target runs instead of row-by-row checks. Most effective with `--presort-storage`. |
 
 ### Scan-Path Optimisations
 
-| Flag | ID | Description |
-|------|----|-------------|
-| `--reuse` | C1/C2 | Build a cumulative min-PPSM table in a single O(N) pass. All 568 queries become O(1) lookups. **Headline optimisation: 749× query speedup.** |
-| `--late-materialise` | C3 | Defer loading of display-only columns (Block, Flat_Model, Street_Name) until a query result is confirmed. |
-| `--predicate-reorder` | C4 | Evaluate Town predicate before Year/Month. **Negative result: 0.06× — rejected.** |
-| `--int-multiply` | C6 | Integer early-exit gate: skip floating-point PPSM computation when `price > 4725 × area`. |
+| Flag | Description |
+|------|-------------|
+| `--reuse` | Build a cumulative min-PPSM table in a single O(N) pass. All 568 queries become O(1) lookups. **Headline optimisation: 749× query speedup.** |
+| `--late-materialise` | Defer loading of display-only columns (Block, Flat_Model, Street_Name) until a query result is confirmed. |
+| `--predicate-reorder` | Evaluate Town predicate before Year/Month. **Negative result: 0.06× — rejected.** |
+| `--int-multiply` | Integer early-exit gate: skip floating-point PPSM computation when `price > 4725 × area`. |
 
 ### I/O Layer
 
-| Flag | ID | Description |
-|------|----|-------------|
-| `--mmap-io` | D2 | Use POSIX `mmap(2)` instead of `ifstream` for column file loading. Requires `--columnar-files`. |
+| Flag | Description |
+|------|-------------|
+| `--mmap-io` | Use POSIX `mmap(2)` instead of `ifstream` for column file loading. Requires `--columnar-files`. |
 
 ### Utility Flags (Data Preparation)
 
