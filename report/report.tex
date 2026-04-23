@@ -172,8 +172,8 @@
 % ===================== ABSTRACT =====================
 \noindent\textbf{Abstract.}~%
 We present our highly performant columnar store query engine.
-It implements \textbf{14 distinct optimisations}, spanning five architectural layers.
-They include encoding (Dictionary, Precomputed aggregates), Physical layout (Pre-sorted clustering, Per-column binary files, Town partitioning), Indexing (Zone maps, Bitmap indices, Binary search), Scan-path rewriting (Result reuse, Late materialisation, Predicate reordering, Integer gating), and I/O management (Chunked streaming, Memory-mapped I/O).
+It implements \textbf{15 distinct optimisations}, spanning five architectural layers.
+They include encoding (Dictionary, Precomputed aggregates, RLE town compression), Physical layout (Pre-sorted clustering, Per-column binary files, Town partitioning), Indexing (Zone maps, Bitmap indices, Binary search), Scan-path rewriting (Result reuse, Late materialisation, Predicate reordering, Integer gating), and I/O management (Chunked streaming, Memory-mapped I/O).
 All optimisations are toggleable by boolean flags.
 This enables us to build a combinatorial evaluation suite testing across 40 permutations of optimisations, each with correctness verification.
 Physical town partitioning together with Result reuse achieves a \textbf{3,389$\times$ query speedup} at only 660\,KB memory.
@@ -386,14 +386,15 @@ If a row is in memory, it implicitly means that it must belong to a target town.
 No other town comparisions are then needed.
 Memory footprint also drops to \textbf{660\,KB}, which is 99.1\% less than baseline.
 
-\subsection{RLE on Sorted Towns}
-We implement Run length encoding on sorted town columns within each partition by compressing \texttt{town\_encoded.col} to a single (value, count) pair per partition.
+\subsection{RLE on Sorted Towns}\label{sec:rle}
+We implement run-length encoding on sorted town columns by compressing \texttt{town\_encoded.col} into (value, start, length) triples:
 \[
-	exttt{run\_value}[k],\; \texttt{run\_start}[k],\; \texttt{run\_length}[k].
+  \texttt{run\_value}[k],\; \texttt{run\_start}[k],\; \texttt{run\_length}[k].
 \]
-
-The query engine resolves requested towns to run IDs and scans only selected intervals
-instead of checking town equality for every row.
+The query engine resolves requested towns to run IDs and scans only the selected intervals, skipping non-matching runs entirely instead of checking town equality for every row.
+Without pre-sorting (A5 alone), the unsorted column produces 2,570 runs; the engine still skips 122.86M rows via run boundaries, reducing rows scanned post-RLE to 24.39M and achieving a 10.5$\times$ query speedup.
+With pre-sorting (A2+A5), each town forms a single contiguous run (26 runs total), and town comparisons drop to zero.
+The strongest composition is B3+A2+A5: binary search narrows each town partition to the target month range, and RLE eliminates all remaining town equality checks, yielding a 180$\times$ query speedup (13.7\,ms query time).
 
 \subsection{Exception Handling}\label{sec:except}
 In empty result sets, we return a ``No result'' row in our output.
@@ -416,7 +417,7 @@ Zone maps (B1)              & $+\epsilon$ mem             & $-$25\% query   & ke
 Bitmap index Town (B2)      & $+$1.1\% mem                & $-$582\% query & reject \\
 mmap I/O (D2)               & $\sim$ mem                  & $-$55\% load    & keep (I/O) \\
 Town partitioning (E1)      & $-$99.1\% mem               & $-$90.9\% query & keep \\
-RLE Town column (planned)   & $-\epsilon$ disk            & TBD             & \textit{placeholder} \\
+RLE Town column (A5)        & $+\epsilon$ mem             & $-$90.5\% query & keep (with A2) \\
 \bottomrule
 \end{tabular}
 \caption{Storage decisions as explicit trade-offs. All deltas vs.\ baseline.}\label{tab:tradeoff}
@@ -449,8 +450,8 @@ Across the full grid this produces 147.25M row iterations and 12.55M town compar
 
 \subsection{Composable Scan Architecture}\label{sec:compose}
 
-All 14 optimisations are controlled by independent boolean flags in the \texttt{ColumnStore} struct (toggled via \texttt{OptConfig} in the evaluation suite).
-The query engine has three paths: (1)~a \emph{reuse path} (C1+C2) that short-circuits via the cumulative table (\S\ref{sec:reuse}), (2)~a \emph{unified scan loop} where each flag controls one orthogonal decision---A1 selects int vs.\ string comparison, B1 wraps the loop in chunk-level pruning, B2 replaces the town predicate with a bitmap mask, C4 reorders predicates, C6 gates float computation, A4 selects the PPSM source, and C3 defers the price column to a Phase~2 survivors pass, and (3)~a \emph{partition-pruned path} (E1) that loads only target-town data before entering either path~(1) or~(2).
+All 15 optimisations are controlled by independent boolean flags in the \texttt{ColumnStore} struct (toggled via \texttt{OptConfig} in the evaluation suite).
+The query engine has three paths: (1)~a \emph{reuse path} (C1+C2) that short-circuits via the cumulative table (\S\ref{sec:reuse}), (2)~a \emph{unified scan loop} where each flag controls one orthogonal decision---A1 selects int vs.\ string comparison, B1 wraps the loop in chunk-level pruning, B2 replaces the town predicate with a bitmap mask, A5 replaces per-row town checks with run-level skipping, C4 reorders predicates, C6 gates float computation, A4 selects the PPSM source, and C3 defers the price column to a Phase~2 survivors pass, and (3)~a \emph{partition-pruned path} (E1) that loads only target-town data before entering either path~(1) or~(2).
 D2 (mmap) is an I/O-layer substitution under A9, transparent to the scan logic.
 This composability allows the evaluation suite to test ${\sim}40$ configurations and isolate each contribution.
 
@@ -554,8 +555,9 @@ Each optimisation preserves output equivalence:
 \textbf{C6}~is a sufficient condition for ``cannot beat current minimum.''
 \textbf{D1}~processes the same rows in bounded batches; the cumulative table is merged across chunks via the associativity of $\min$.
 \textbf{D2}~\texttt{memcpy} from mapped region produces byte-identical vectors as \texttt{fread}.
+\textbf{A5}~RLE run boundaries mark contiguous blocks of identical town values; skipping a non-matching run is equivalent to skipping each row individually.
 \textbf{E1}~partition loading concatenates disjoint town subsets; the union equals the set of rows matching the town predicate.
-All ${\sim}40$ configurations produced byte-identical output, verified by the evaluation suite's per-result hash comparison (\S\ref{sec:correct-inv}).
+All ${\sim}46$ configurations produced byte-identical output, verified by the evaluation suite's per-result hash comparison (\S\ref{sec:correct-inv}).
 
 % ===================== SECTION 3: EXPERIMENT RESULT =====================
 \section{Experiment Result}\label{sec:experiment}
@@ -617,6 +619,12 @@ D2+All mmap+Everything                &    41.0 &     45.5 &    86.5 &  50.5$\ti
 A2+B3 Pre-sort+BSearch                & 3,293.5 &     11.9 & 3,305.4 & 193$\times$   &   751.7K & 71.0\,MB \\
 A9+A2+B3 Col+Sort+BSearch             &   115.3 &     69.3 &   184.5 &  33.2$\times$ &   751.7K &  2.7\,MB \\
 \midrule
+\multicolumn{7}{@{}l}{\textit{RLE town skipping path (A5):}} \\
+A5: RLE Town                          & 2,526.0 &    234.7 & 2,760.7 &  10.5$\times$ &    24.4M & 71.5\,MB \\
+A2+A5 Presort+RLE                     & 2,981.1 &    224.7 & 3,205.8 &  10.9$\times$ &    24.4M & 71.0\,MB \\
+B3+A2+A5 BSearch+Presort+RLE          & 2,979.8 &     13.7 & 2,993.5 & 180$\times$   &   751.7K & 71.0\,MB \\
+A9+A2+A5+B3 Col+Sort+RLE+BSearch      &   104.5 &     55.8 &   160.3 &  44.0$\times$ &   751.7K &  2.7\,MB \\
+\midrule
 \multicolumn{7}{@{}l}{\textit{Partition-pruned path (E1):}} \\
 E1: Town Partition                    &    72.0 &    208.4 &   280.4 &  11.0$\times$ &    24.4M &  660\,KB \\
 E1+B1 Partition+ZoneMaps              &    74.1 &    168.0 &   242.1 &  13.7$\times$ &    24.4M &  1.2\,MB \\
@@ -634,7 +642,7 @@ E1+All Partition+Everything           &    73.5 &      0.7 &    74.2 & 3{,}403$\
 
 \subsection{Correctness Invariant}\label{sec:correct-inv}
 The evaluation suite (\texttt{eval\_suite.cpp}) compares each configuration's 568-entry output vector against the baseline element-by-element, checking that the $(x,y)$ pair, all output fields, and the computed PricePerSqm are identical.
-All ${\sim}40$ configurations report PASS.
+All ${\sim}46$ configurations report PASS.
 
 \subsection{Negative and Neutral Results}\label{sec:negative}
 The professor explicitly requested trade-off justification (clarification Q1).
@@ -693,8 +701,8 @@ The largest query-time win was result reuse (C1+C2): a single $O(N)$ build pass 
 Physical town partitioning (E1) reduced the build-pass input from 259.2K to 42.9K rows, yielding 3{,}389$\times$ query speedup and 660\,KB memory---the most memory-efficient configuration.
 The fastest end-to-end configuration was D2+C1C2 (mmap + reuse) at 71.9\,ms total (67.3$\times$), where mmap's 55\% load-time reduction composed with reuse's scan elimination.
 The most instructive failures were C4 predicate reordering ($0.06\times$) and B2 bitmap indexing ($0.15\times$): C4 demonstrated that optimal predicate order must minimise cost\,$\times$\,pass\_rate, while B2 showed that eliminating a cheap predicate via a more expensive mechanism can regress performance when upstream predicates already prune effectively.
-Across all 14 optimisations and ${\sim}40$ tested configurations, every result was byte-identical to the baseline---correctness was never sacrificed for speed.
-If revisiting this project, we would explore RLE compression on sorted partition columns and a cost-based predicate optimiser that dynamically selects evaluation order.
+Across all 15 optimisations and ${\sim}40$ tested configurations, every result was byte-identical to the baseline---correctness was never sacrificed for speed.
+If revisiting this project, we would explore a cost-based predicate optimiser that dynamically selects evaluation order.
 
 % ===================== APPENDIX =====================
 \section*{Appendix: Figures}
