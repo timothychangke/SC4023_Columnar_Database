@@ -90,6 +90,28 @@ std::size_t upperBoundMonthKey(const ColumnStore& db,
     }
     return l;
 }
+
+// Checks if a row passes both area and price thresholds.
+// Returns false if area < y_threshold or ppsm > 4725, otherwise true.
+inline bool passesAreaAndPriceFilters(const ColumnStore& db,
+                                      uint16_t row_floor_area,
+                                      uint32_t row_resale_price,
+                                      int y_threshold) {
+    // Area must meet minimum threshold
+    if (row_floor_area < static_cast<uint16_t>(y_threshold)) {
+        return false;
+    }
+    
+    // Price per sqm must be <= 4725 (via integer multiply optimization when enabled)
+    if (db.use_int_multiply) {
+        if (static_cast<uint64_t>(row_resale_price) >
+            4725ULL * static_cast<uint64_t>(row_floor_area)) {
+            return false;
+        }
+    }
+    
+    return true;
+}
 } 
 
 // Updates best candidate tracking. Parameters are references: all modifications
@@ -114,23 +136,21 @@ inline bool updateBestCandidate(double ppsm,
 inline void materializeResultDetails(const ColumnStore& db,
                                      std::size_t idx,
                                      QueryResult& result,
-                                     bool allow_partitioned_columnar = false) {
-    const bool read_from_column_files =
-        db.use_columnar_files && (allow_partitioned_columnar || !db.use_town_partitioning);
-
-    if (read_from_column_files) {
-        result.town = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/town.col", idx)
-            : loadStringAt(db.column_dir + "/town.col", idx);
-        result.block = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/block.col", idx)
-            : loadStringAt(db.column_dir + "/block.col", idx);
-        result.flat_model = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/flat_model.col", idx)
-            : loadStringAt(db.column_dir + "/flat_model.col", idx);
-        result.lease_commence_date = db.use_mmap_io
-            ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", idx)
-            : loadUint16At(db.column_dir + "/lease_commence_date.col", idx);
+                                     bool allow_partitioned_columnar = false,
+                                    bool condition_met) {
+    if (condition_met) {
+    result.town = db.use_mmap_io
+        ? loadStringAtMmap(db.column_dir + "/town.col", idx)
+        : loadStringAt(db.column_dir + "/town.col", idx);
+    result.block = db.use_mmap_io
+        ? loadStringAtMmap(db.column_dir + "/block.col", idx)
+        : loadStringAt(db.column_dir + "/block.col", idx);
+    result.flat_model = db.use_mmap_io
+        ? loadStringAtMmap(db.column_dir + "/flat_model.col", idx)
+        : loadStringAt(db.column_dir + "/flat_model.col", idx);
+    result.lease_commence_date = db.use_mmap_io
+        ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", idx)
+        : loadUint16At(db.column_dir + "/lease_commence_date.col", idx);
     } else {
         result.town                = db.col_town[idx];
         result.block               = db.col_block[idx];
@@ -138,7 +158,6 @@ inline void materializeResultDetails(const ColumnStore& db,
         result.lease_commence_date = db.col_lease_commence_date[idx];
     }
 }
-
 
 std::vector<std::string> buildTownList(const std::string& matric_number) {
     static const std::string TOWN_MAP[10] = {
@@ -264,8 +283,8 @@ void runQuery(const ColumnStore&              db,
             result.no_result = true;
             return;
         }
-
-        materializeResultDetails(db, e.idx, result);
+        bool should_materialise = db.use_columnar_files && !db.use_town_partitioning;
+        materializeResultDetails(db, e.idx, result, false, should_materialise);
         return;
     }
 
@@ -333,11 +352,8 @@ void runQuery(const ColumnStore&              db,
 
                 if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
 
-                if (db.use_int_multiply) {
-                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
-                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i])) {
-                        continue;
-                    }
+                if (!passesAreaAndPriceFilters(db, db.col_floor_area[i], db.col_resale_price[i], y)) {
+                    continue;
                 }
 
                 const double ppsm = db.use_precomputed_ppsm
@@ -361,7 +377,7 @@ void runQuery(const ColumnStore&              db,
         result.floor_area    = db.col_floor_area[best_i];
         result.price_per_sqm = min_ppsm;
 
-        materializeResultDetails(db, best_i, result, true);
+        materializeResultDetails(db, best_i, result, true, db.use_columnar_files);
         return;
     }
 
@@ -402,11 +418,8 @@ void runQuery(const ColumnStore&              db,
 
                 // cheap integer check before division.
                 // If price > 4725 * area, PPSM must be > 4725, so skip early.
-                if (db.use_int_multiply) {
-                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
-                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i])) {
-                        continue;
-                    }
+                if (!passesAreaAndPriceFilters(db, db.col_floor_area[i], db.col_resale_price[i], y)) {
+                    continue;
                 }
 
                 const double ppsm = db.use_precomputed_ppsm
@@ -430,14 +443,8 @@ void runQuery(const ColumnStore&              db,
         result.floor_area          = db.col_floor_area[best_i];
         result.price_per_sqm       = min_ppsm;
 
-        if (db.use_columnar_files && !db.use_town_partitioning) {
-            materializeResultDetails(db, best_i, result, false);
-        } else {
-            result.town                = db.col_town[best_i];
-            result.block               = db.col_block[best_i];
-            result.flat_model          = db.col_flat_model[best_i];
-            result.lease_commence_date = db.col_lease_commence_date[best_i];
-        }
+        bool should_materialize = db.use_columnar_files && !db.use_town_partitioning;
+        materializeResultDetails(db, best_i, result, false, should_materialize);
         return;
     }
 
@@ -560,10 +567,8 @@ void runQuery(const ColumnStore&              db,
                 survivors.push_back(i);
             } else {
                 // Integer Multiplication Trick 
-                if (db.use_int_multiply) {
-                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
-                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i]))
-                        continue;
+                if (!passesAreaAndPriceFilters(db, db.col_floor_area[i], db.col_resale_price[i], y)) {
+                    continue;
                 }
 
                 // Pre-computed PPSM vs. on-the-fly division 
@@ -580,10 +585,8 @@ void runQuery(const ColumnStore&              db,
     if (db.use_late_materialise) {
         for (const size_t idx : survivors) {
             // integer gate on survivors
-            if (db.use_int_multiply) {
-                if (static_cast<uint64_t>(db.col_resale_price[idx]) >
-                    4725ULL * static_cast<uint64_t>(db.col_floor_area[idx]))
-                    continue;
+            if (!passesAreaAndPriceFilters(db, db.col_floor_area[idx], db.col_resale_price[idx], y)) {
+                continue;
             }
 
             // precomputed vs on-the-fly
@@ -607,7 +610,8 @@ void runQuery(const ColumnStore&              db,
     result.floor_area = db.col_floor_area[best_i];
     result.price_per_sqm = min_ppsm;
 
-    materializeResultDetails(db, best_i, result);
+    bool should_materialise = db.use_columnar_files && !db.use_town_partitioning;
+    materializeResultDetails(db, best_i, result, false, should_materialise);
 }
 
 
