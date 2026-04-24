@@ -92,6 +92,53 @@ std::size_t upperBoundMonthKey(const ColumnStore& db,
 }
 } 
 
+// Updates best candidate tracking. Parameters are references: all modifications
+// propagate back to caller. Returns true if candidate was updated.
+inline bool updateBestCandidate(double ppsm,
+                                std::size_t row_idx,
+                                double& min_ppsm,
+                                std::size_t& best_i,
+                                QueryResult& result) {
+    if (ppsm < min_ppsm) {
+        min_ppsm         = ppsm;  // by-ref: propagates to caller
+        best_i           = row_idx;  // by-ref: propagates to caller
+        result.local_idx = row_idx;  // by-ref: propagates to caller
+        result.no_result = false;
+        return true;
+    }
+    return false;
+}
+
+// Materializes result display fields (town, block, flat_model, lease_commence_date).
+// Result is passed by-ref, so all field assignments persist in caller's result.
+inline void materializeResultDetails(const ColumnStore& db,
+                                     std::size_t idx,
+                                     QueryResult& result,
+                                     bool allow_partitioned_columnar = false) {
+    const bool read_from_column_files =
+        db.use_columnar_files && (allow_partitioned_columnar || !db.use_town_partitioning);
+
+    if (read_from_column_files) {
+        result.town = db.use_mmap_io
+            ? loadStringAtMmap(db.column_dir + "/town.col", idx)
+            : loadStringAt(db.column_dir + "/town.col", idx);
+        result.block = db.use_mmap_io
+            ? loadStringAtMmap(db.column_dir + "/block.col", idx)
+            : loadStringAt(db.column_dir + "/block.col", idx);
+        result.flat_model = db.use_mmap_io
+            ? loadStringAtMmap(db.column_dir + "/flat_model.col", idx)
+            : loadStringAt(db.column_dir + "/flat_model.col", idx);
+        result.lease_commence_date = db.use_mmap_io
+            ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", idx)
+            : loadUint16At(db.column_dir + "/lease_commence_date.col", idx);
+    } else {
+        result.town                = db.col_town[idx];
+        result.block               = db.col_block[idx];
+        result.flat_model          = db.col_flat_model[idx];
+        result.lease_commence_date = db.col_lease_commence_date[idx];
+    }
+}
+
 
 std::vector<std::string> buildTownList(const std::string& matric_number) {
     static const std::string TOWN_MAP[10] = {
@@ -218,25 +265,7 @@ void runQuery(const ColumnStore&              db,
             return;
         }
 
-        if (db.use_columnar_files && !db.use_town_partitioning) {
-            result.town                = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/town.col", e.idx)
-                : loadStringAt(db.column_dir + "/town.col", e.idx);
-            result.block               = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/block.col", e.idx)
-                : loadStringAt(db.column_dir + "/block.col", e.idx);
-            result.flat_model          = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/flat_model.col", e.idx)
-                : loadStringAt(db.column_dir + "/flat_model.col", e.idx);
-            result.lease_commence_date = db.use_mmap_io
-                ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", e.idx)
-                : loadUint16At(db.column_dir + "/lease_commence_date.col", e.idx);
-        } else {
-            result.town                = db.col_town[e.idx];
-            result.block               = db.col_block[e.idx];
-            result.flat_model          = db.col_flat_model[e.idx];
-            result.lease_commence_date = db.col_lease_commence_date[e.idx];
-        }
+        materializeResultDetails(db, e.idx, result);
         return;
     }
 
@@ -316,12 +345,7 @@ void runQuery(const ColumnStore&              db,
                     : static_cast<double>(db.col_resale_price[i]) /
                       static_cast<double>(db.col_floor_area[i]);
 
-                if (ppsm < min_ppsm) {
-                    min_ppsm = ppsm;
-                    best_i   = i;
-                    result.local_idx = i;
-                    result.no_result = false;
-                }
+                updateBestCandidate(ppsm, i, min_ppsm, best_i, result);
             }
         }
 
@@ -337,17 +361,7 @@ void runQuery(const ColumnStore&              db,
         result.floor_area    = db.col_floor_area[best_i];
         result.price_per_sqm = min_ppsm;
 
-        if (db.use_columnar_files) {
-            result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
-            result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
-            result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
-            result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
-        } else {
-            result.town                = db.col_town[best_i];
-            result.block               = db.col_block[best_i];
-            result.flat_model          = db.col_flat_model[best_i];
-            result.lease_commence_date = db.col_lease_commence_date[best_i];
-        }
+        materializeResultDetails(db, best_i, result, true);
         return;
     }
 
@@ -400,12 +414,7 @@ void runQuery(const ColumnStore&              db,
                     : static_cast<double>(db.col_resale_price[i]) /
                       static_cast<double>(db.col_floor_area[i]);
 
-                if (ppsm < min_ppsm) {
-                    min_ppsm = ppsm;
-                    best_i   = i;
-                    result.local_idx = i;  
-                    result.no_result = false;
-                }
+                updateBestCandidate(ppsm, i, min_ppsm, best_i, result);
             }
         }
 
@@ -422,18 +431,7 @@ void runQuery(const ColumnStore&              db,
         result.price_per_sqm       = min_ppsm;
 
         if (db.use_columnar_files && !db.use_town_partitioning) {
-            result.town                = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
-                : loadStringAt(db.column_dir + "/town.col", best_i);
-            result.block               = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/block.col", best_i)
-                : loadStringAt(db.column_dir + "/block.col", best_i);
-            result.flat_model          = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/flat_model.col", best_i)
-                : loadStringAt(db.column_dir + "/flat_model.col", best_i);
-            result.lease_commence_date = db.use_mmap_io
-                ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", best_i)
-                : loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
+            materializeResultDetails(db, best_i, result, false);
         } else {
             result.town                = db.col_town[best_i];
             result.block               = db.col_block[best_i];
@@ -574,12 +572,7 @@ void runQuery(const ColumnStore&              db,
                     : static_cast<double>(db.col_resale_price[i]) /
                       static_cast<double>(db.col_floor_area[i]);
 
-                if (ppsm < min_ppsm) {
-                    min_ppsm = ppsm;
-                    best_i   = i;
-                    result.local_idx = i; 
-                    result.no_result = false;
-                }
+                updateBestCandidate(ppsm, i, min_ppsm, best_i, result);
             }
         } // end inner loop (rows)
     } // end outer loop (chunks)
@@ -599,12 +592,7 @@ void runQuery(const ColumnStore&              db,
                 : static_cast<double>(db.col_resale_price[idx]) /
                   static_cast<double>(db.col_floor_area[idx]);
 
-            if (ppsm < min_ppsm) {
-                min_ppsm = ppsm;
-                best_i   = idx;
-                result.local_idx = idx; 
-                result.no_result = false;
-            }
+            updateBestCandidate(ppsm, idx, min_ppsm, best_i, result);
         }
     }
 
@@ -619,25 +607,7 @@ void runQuery(const ColumnStore&              db,
     result.floor_area = db.col_floor_area[best_i];
     result.price_per_sqm = min_ppsm;
 
-    if (db.use_columnar_files && !db.use_town_partitioning) {
-        result.town                = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
-            : loadStringAt(db.column_dir + "/town.col", best_i);
-        result.block               = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/block.col", best_i)
-            : loadStringAt(db.column_dir + "/block.col", best_i);
-        result.flat_model          = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/flat_model.col", best_i)
-            : loadStringAt(db.column_dir + "/flat_model.col", best_i);
-        result.lease_commence_date = db.use_mmap_io
-            ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", best_i)
-            : loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
-    } else {
-        result.town                = db.col_town[best_i];
-        result.block               = db.col_block[best_i];
-        result.flat_model          = db.col_flat_model[best_i];
-        result.lease_commence_date = db.col_lease_commence_date[best_i];
-    }
+    materializeResultDetails(db, best_i, result);
 }
 
 
