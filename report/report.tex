@@ -752,7 +752,7 @@ Across all 15 optimisations and ${\sim}40$ tested configurations, every result w
   ]
 
   % ================================================================
-  %  ROW 1: INPUT (left) + ENCODING (right) — shifted further left
+  %  ROW 1: INPUT (left) + ENCODING (right): shifted further left
   % ================================================================
 
   \node[bigbox, fill=csvcolor, minimum width=1.9cm, minimum height=0.8cm]
@@ -788,7 +788,7 @@ Across all 15 optimisations and ${\sim}40$ tested configurations, every result w
   \draw[arr] (csv) -- (parser);
 
   % ================================================================
-  %  ROW 2: PER-COLUMN BINARY FILES — shifted left
+  %  ROW 2: PER-COLUMN BINARY FILES: shifted left
   % ================================================================
 
   \coordinate (col_center) at ($(csv.south)!0.5!(enc_layer.south)$);
@@ -823,10 +823,10 @@ Across all 15 optimisations and ${\sim}40$ tested configurations, every result w
     node[midway, right=2pt, ann] {one .col file per column};
 
   % ================================================================
-  %  ROW 3: THREE-COLUMN LAYOUT — I/O | Index+Metadata | Partition
+  %  ROW 3: THREE-COLUMN LAYOUT: I/O | Index+Metadata | Partition
   % ================================================================
 
-% -- I/O Layer (left) — anchored to left side of stor_layer --
+% -- I/O Layer (left): anchored to left side of stor_layer --
   \node[optbox, fill=iocol!60, minimum width=2.6cm, minimum height=0.40cm,
         below=1.3cm of stor_layer.south west, anchor=north, xshift=-1.5cm] (io_chunk)
     {\textbf{Chunked Streaming}};
@@ -890,7 +890,7 @@ Across all 15 optimisations and ${\sim}40$ tested configurations, every result w
     node[midway, right=2pt, ann] {split by town};
 
   % ================================================================
-  %  ROW 4: QUERY ENGINE — full width below the three-column row
+  %  ROW 4: QUERY ENGINE: full width below the three-column row
   % ================================================================
 
   \coordinate (eng_top) at ($(io_layer.south)!0.5!(idx_layer.south) + (0, -1.1cm)$);
@@ -977,7 +977,7 @@ Across all 15 optimisations and ${\sim}40$ tested configurations, every result w
     {lazy-load display cols};
 
   % ================================================================
-  %  LEGEND (single row) — more spaced out between each item
+  %  LEGEND (single row): more spaced out between each item
   % ================================================================
   \coordinate (legstart) at ($(output.south west) + (0, -0.5)$);
   \node[anchor=north west] at (legstart) {%

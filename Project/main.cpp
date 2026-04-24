@@ -198,11 +198,11 @@ int main(int argc, char* argv[]) {
     try {
         // mmap requires columnar files, conflicts with chunked I/O
         if (db.use_mmap_io && !db.use_columnar_files) {
-            std::cout << "  WARNING: mmap_io requires columnar_files — disabling D2.\n";
+            std::cout << "  WARNING: mmap_io requires columnar_files: disabling D2.\n";
             db.use_mmap_io = false;
         }
         if (db.use_mmap_io && db.use_chunked_io) {
-            std::cout << "  WARNING: mmap_io conflicts with chunked_io — disabling D2.\n";
+            std::cout << "  WARNING: mmap_io conflicts with chunked_io: disabling D2.\n";
             db.use_mmap_io = false;
         }
 
