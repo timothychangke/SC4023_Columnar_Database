@@ -90,6 +90,403 @@ std::size_t upperBoundMonthKey(const ColumnStore& db,
     }
     return l;
 }
+
+inline bool failsIntMultiplyGate(const ColumnStore& db, std::size_t idx) {
+    return db.use_int_multiply &&
+           static_cast<uint64_t>(db.col_resale_price[idx]) >
+               4725ULL * static_cast<uint64_t>(db.col_floor_area[idx]);
+}
+
+inline double computePpsmAt(const ColumnStore& db, std::size_t idx) {
+    return db.use_precomputed_ppsm
+               ? db.col_price_per_sqm[idx]
+               : static_cast<double>(db.col_resale_price[idx]) /
+                     static_cast<double>(db.col_floor_area[idx]);
+}
+
+inline void setResultScalars(const ColumnStore& db,
+                             std::size_t        idx,
+                             double             min_ppsm,
+                             QueryResult&       result) {
+    result.year          = db.col_month_year[idx];
+    result.month         = db.col_month_month[idx];
+    result.floor_area    = db.col_floor_area[idx];
+    result.price_per_sqm = min_ppsm;
+}
+
+void materializeResultColumns(const ColumnStore& db,
+                              std::size_t        idx,
+                              QueryResult&       result,
+                              bool               allow_mmap,
+                              bool               bypass_town_partition_guard) {
+    const bool can_materialize_from_files =
+        db.use_columnar_files &&
+        (bypass_town_partition_guard || !db.use_town_partitioning);
+
+    if (can_materialize_from_files) {
+        const bool use_mmap_lazy = allow_mmap && db.use_mmap_io;
+        result.town = use_mmap_lazy
+                          ? loadStringAtMmap(db.column_dir + "/town.col", idx)
+                          : loadStringAt(db.column_dir + "/town.col", idx);
+        result.block = use_mmap_lazy
+                           ? loadStringAtMmap(db.column_dir + "/block.col", idx)
+                           : loadStringAt(db.column_dir + "/block.col", idx);
+        result.flat_model = use_mmap_lazy
+                                ? loadStringAtMmap(db.column_dir + "/flat_model.col", idx)
+                                : loadStringAt(db.column_dir + "/flat_model.col", idx);
+        result.lease_commence_date = use_mmap_lazy
+                                         ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", idx)
+                                         : loadUint16At(db.column_dir + "/lease_commence_date.col", idx);
+        return;
+    }
+
+    result.town                = db.col_town[idx];
+    result.block               = db.col_block[idx];
+    result.flat_model          = db.col_flat_model[idx];
+    result.lease_commence_date = db.col_lease_commence_date[idx];
+}
+
+bool tryAnswerFromReusePath(const ColumnStore& db,
+                            int                x,
+                            int                y,
+                            QueryResult&       result) {
+    if (!(db.use_reuse && !db.cum_table.empty())) {
+        return false;
+    }
+
+    const MinEntry& e = db.cum_table[x][y];
+    if (!e.has) {
+        return true;
+    }
+
+    result.no_result     = false;
+    result.local_idx     = e.idx;
+    result.price_per_sqm = e.ppsm;
+    result.year          = db.col_month_year[e.idx];
+    result.month         = db.col_month_month[e.idx];
+    result.floor_area    = db.col_floor_area[e.idx];
+
+    if (e.ppsm > 4725.0) {
+        result.no_result = true;
+        return true;
+    }
+
+    materializeResultColumns(db, e.idx, result, true, false);
+    return true;
+}
+
+bool tryAnswerFromRlePath(const ColumnStore&              db,
+                          uint16_t                        target_year,
+                          uint8_t                         start_month,
+                          uint8_t                         end_month,
+                          const std::vector<std::string>& towns,
+                          QueryResult&                    result) {
+    if (!(db.use_rle_town && !db.town_run_start.empty())) {
+        return false;
+    }
+
+    const std::size_t N = db.size();
+    std::vector<uint32_t> selected_runs;
+    selected_runs.reserve(towns.size());
+
+    if (db.use_dict_encoding) {
+        for (const auto& town : towns) {
+            uint16_t tid = 0;
+            if (!db.dict_town.lookup(town, tid)) continue;
+            auto it = db.town_to_runs_encoded.find(tid);
+            if (it == db.town_to_runs_encoded.end()) continue;
+            selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
+        }
+    } else {
+        for (const auto& town : towns) {
+            auto it = db.town_to_runs.find(town);
+            if (it == db.town_to_runs.end()) continue;
+            selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
+        }
+    }
+
+    if (selected_runs.empty()) {
+        db.rows_skipped_by_rle = static_cast<uint64_t>(N);
+        return true;
+    }
+
+    std::sort(selected_runs.begin(), selected_runs.end());
+    selected_runs.erase(std::unique(selected_runs.begin(), selected_runs.end()), selected_runs.end());
+
+    uint64_t rows_in_selected_runs = 0;
+    for (const uint32_t run_id : selected_runs) {
+        rows_in_selected_runs += static_cast<uint64_t>(db.town_run_length[run_id]);
+    }
+    db.rows_skipped_by_rle = (rows_in_selected_runs >= N)
+                                 ? 0
+                                 : static_cast<uint64_t>(N) - rows_in_selected_runs;
+
+    const uint32_t start_key = monthKey(target_year, start_month);
+    const uint32_t end_key   = monthKey(target_year, end_month);
+
+    double      min_ppsm = std::numeric_limits<double>::max();
+    std::size_t best_i   = 0;
+
+    for (const uint32_t run_id : selected_runs) {
+        ++db.town_runs_scanned;
+
+        const std::size_t run_start = db.town_run_start[run_id];
+        const std::size_t run_end   = run_start + db.town_run_length[run_id];
+
+        std::size_t scan_l = run_start;
+        std::size_t scan_r = run_end;
+
+        if (db.use_presorted_storage && db.use_month_binary_search) {
+            scan_l = lowerBoundMonthKey(db, run_start, run_end, start_key);
+            scan_r = upperBoundMonthKey(db, scan_l, run_end, end_key);
+        }
+
+        for (std::size_t i = scan_l; i < scan_r; ++i) {
+            ++db.rows_scanned_after_rle;
+
+            if (!(db.use_presorted_storage && db.use_month_binary_search)) {
+                if (db.col_month_year[i] != target_year) continue;
+                const uint8_t m = db.col_month_month[i];
+                if (m < start_month || m > end_month) continue;
+            }
+
+            if (db.col_floor_area[i] < static_cast<uint16_t>(result.y)) continue;
+            if (failsIntMultiplyGate(db, i)) continue;
+
+            const double ppsm = computePpsmAt(db, i);
+            if (ppsm < min_ppsm) {
+                min_ppsm       = ppsm;
+                best_i         = i;
+                result.local_idx = i;
+                result.no_result = false;
+            }
+        }
+    }
+
+    if (result.no_result) return true;
+    if (min_ppsm > 4725.0) {
+        result.no_result = true;
+        return true;
+    }
+
+    setResultScalars(db, best_i, min_ppsm, result);
+    materializeResultColumns(db, best_i, result, false, true);
+    return true;
+}
+
+bool tryAnswerFromPresortedBsearchPath(const ColumnStore&              db,
+                                       uint16_t                        target_year,
+                                       uint8_t                         start_month,
+                                       uint8_t                         end_month,
+                                       const std::vector<std::string>& towns,
+                                       QueryResult&                    result) {
+    if (!(db.use_presorted_storage && db.use_month_binary_search)) {
+        return false;
+    }
+
+    const uint32_t start_key = monthKey(target_year, start_month);
+    const uint32_t end_key   = monthKey(target_year, end_month);
+
+    double      min_ppsm = std::numeric_limits<double>::max();
+    std::size_t best_i   = 0;
+
+    for (const auto& town : towns) {
+        TownPartition part;
+        bool has_part = false;
+
+        if (db.use_dict_encoding) {
+            uint16_t tid = 0;
+            if (db.dict_town.lookup(town, tid) &&
+                tid < db.town_partitions_encoded.size() &&
+                db.town_partitions_encoded[tid].valid) {
+                part = db.town_partitions_encoded[tid];
+                has_part = true;
+            }
+        } else {
+            auto it = db.town_partitions.find(town);
+            if (it != db.town_partitions.end() && it->second.valid) {
+                part = it->second;
+                has_part = true;
+            }
+        }
+
+        if (!has_part) continue;
+
+        const std::size_t lb = lowerBoundMonthKey(db, part.begin, part.end, start_key);
+        const std::size_t ub = upperBoundMonthKey(db, lb, part.end, end_key);
+
+        for (std::size_t i = lb; i < ub; ++i) {
+            if (db.col_floor_area[i] < static_cast<uint16_t>(result.y)) continue;
+            if (failsIntMultiplyGate(db, i)) continue;
+
+            const double ppsm = computePpsmAt(db, i);
+            if (ppsm < min_ppsm) {
+                min_ppsm       = ppsm;
+                best_i         = i;
+                result.local_idx = i;
+                result.no_result = false;
+            }
+        }
+    }
+
+    if (result.no_result) return true;
+    if (min_ppsm > 4725.0) {
+        result.no_result = true;
+        return true;
+    }
+
+    setResultScalars(db, best_i, min_ppsm, result);
+    materializeResultColumns(db, best_i, result, true, false);
+    return true;
+}
+
+void runUnifiedScanPath(const ColumnStore&              db,
+                        int                             y,
+                        uint16_t                        target_year,
+                        uint8_t                         start_month,
+                        uint8_t                         end_month,
+                        const std::vector<std::string>& towns,
+                        bool                            use_bitmap_path,
+                        const std::vector<uint8_t>*     town_mask_ptr,
+                        QueryResult&                    result) {
+    const std::size_t N = db.size();
+    double      min_ppsm = std::numeric_limits<double>::max();
+    std::size_t best_i   = 0;
+
+    std::vector<uint16_t> town_ids;
+    if (db.use_dict_encoding && !use_bitmap_path && !db.use_town_partitioning) {
+        town_ids.reserve(towns.size());
+        for (const auto& t : towns) {
+            uint16_t id;
+            if (db.dict_town.lookup(t, id)) {
+                town_ids.push_back(id);
+            }
+        }
+        if (town_ids.empty()) return;
+    }
+
+    const std::size_t num_chunks = db.use_zone_maps
+        ? db.zm_floor_area.numChunks()
+        : 1;
+
+    const uint32_t target_year_32 = static_cast<uint32_t>(target_year);
+    const uint32_t start_month_32 = static_cast<uint32_t>(start_month);
+    const uint32_t end_month_32   = static_cast<uint32_t>(end_month);
+    const uint32_t y_threshold    = static_cast<uint32_t>(y);
+
+    std::vector<size_t> survivors;
+    if (db.use_late_materialise) {
+        survivors.reserve(N / 20);
+    }
+
+    for (std::size_t chunk = 0; chunk < num_chunks; ++chunk) {
+        if (db.use_zone_maps) {
+            if (!db.zm_month_year.chunkMayContainEQ(chunk, target_year_32)) continue;
+            if (db.zm_month_month.chunks[chunk].max_val < start_month_32 ||
+                db.zm_month_month.chunks[chunk].min_val > end_month_32) continue;
+            if (!db.zm_floor_area.chunkMayContainGEQ(chunk, y_threshold)) continue;
+        }
+
+        const std::size_t row_start = db.use_zone_maps ? chunk * ZONE_CHUNK_SIZE : 0;
+        const std::size_t row_end   = db.use_zone_maps
+            ? std::min(row_start + ZONE_CHUNK_SIZE, N)
+            : N;
+
+        for (std::size_t i = row_start; i < row_end; ++i) {
+            if (use_bitmap_path) {
+                ++db.town_bitmap_evaluations;
+                if (!(*town_mask_ptr)[i]) {
+                    ++db.rows_eliminated_by_bitmap;
+                    continue;
+                }
+            }
+
+            if (db.use_predicate_reorder) {
+                if (!use_bitmap_path && !db.use_town_partitioning) {
+                    if (db.use_dict_encoding) {
+                        bool match = false;
+                        const uint16_t row_id = db.col_town_encoded[i];
+                        for (const auto& tid : town_ids) {
+                            if (row_id == tid) { match = true; break; }
+                        }
+                        if (!match) continue;
+                    } else {
+                        bool match = false;
+                        for (const auto& t : towns) {
+                            if (db.col_town[i] == t) { match = true; break; }
+                        }
+                        if (!match) continue;
+                    }
+                }
+
+                if (db.col_month_year[i] != target_year) continue;
+                const uint8_t m = db.col_month_month[i];
+                if (m < start_month || m > end_month) continue;
+            } else {
+                if (db.col_month_year[i] != target_year) continue;
+
+                const uint8_t m = db.col_month_month[i];
+                if (m < start_month || m > end_month) continue;
+
+                if (!use_bitmap_path && !db.use_town_partitioning) {
+                    if (db.use_dict_encoding) {
+                        bool match = false;
+                        const uint16_t row_id = db.col_town_encoded[i];
+                        for (const auto& tid : town_ids) {
+                            if (row_id == tid) { match = true; break; }
+                        }
+                        if (!match) continue;
+                    } else {
+                        bool match = false;
+                        for (const auto& t : towns) {
+                            if (db.col_town[i] == t) { match = true; break; }
+                        }
+                        if (!match) continue;
+                    }
+                }
+            }
+
+            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
+
+            if (db.use_late_materialise) {
+                survivors.push_back(i);
+            } else {
+                if (failsIntMultiplyGate(db, i)) continue;
+
+                const double ppsm = computePpsmAt(db, i);
+                if (ppsm < min_ppsm) {
+                    min_ppsm       = ppsm;
+                    best_i         = i;
+                    result.local_idx = i;
+                    result.no_result = false;
+                }
+            }
+        }
+    }
+
+    if (db.use_late_materialise) {
+        for (const size_t idx : survivors) {
+            if (failsIntMultiplyGate(db, idx)) continue;
+
+            const double ppsm = computePpsmAt(db, idx);
+            if (ppsm < min_ppsm) {
+                min_ppsm       = ppsm;
+                best_i         = idx;
+                result.local_idx = idx;
+                result.no_result = false;
+            }
+        }
+    }
+
+    if (result.no_result) return;
+    if (min_ppsm > 4725.0) {
+        result.no_result = true;
+        return;
+    }
+
+    setResultScalars(db, best_i, min_ppsm, result);
+    materializeResultColumns(db, best_i, result, true, false);
+}
 } 
 
 
@@ -180,9 +577,6 @@ void runQuery(const ColumnStore&              db,
     const uint8_t end_month = static_cast<uint8_t>(
         std::min(static_cast<int>(start_month) + x - 1, 12));
 
-    double      min_ppsm = std::numeric_limits<double>::max();
-    std::size_t best_i   = 0;
-
     const std::size_t N = db.size();
 
     // Bitmap setup: reuse a precomputed town mask when available 
@@ -203,441 +597,27 @@ void runQuery(const ColumnStore&              db,
         db.rows_scanned_after_rle = 0;
     }
 
-    if (db.use_reuse && !db.cum_table.empty()) {
-        const MinEntry &e = db.cum_table[x][y];
-        if (!e.has) return;
-
-        result.no_result       = false;
-        result.year            = db.col_month_year[e.idx];
-        result.month           = db.col_month_month[e.idx];
-        result.floor_area      = db.col_floor_area[e.idx];
-        result.price_per_sqm   = e.ppsm;
-
-        if (e.ppsm > 4725.0) {
-            result.no_result = true;
-            return;
-        }
-
-        if (db.use_columnar_files && !db.use_town_partitioning) {
-            result.town                = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/town.col", e.idx)
-                : loadStringAt(db.column_dir + "/town.col", e.idx);
-            result.block               = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/block.col", e.idx)
-                : loadStringAt(db.column_dir + "/block.col", e.idx);
-            result.flat_model          = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/flat_model.col", e.idx)
-                : loadStringAt(db.column_dir + "/flat_model.col", e.idx);
-            result.lease_commence_date = db.use_mmap_io
-                ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", e.idx)
-                : loadUint16At(db.column_dir + "/lease_commence_date.col", e.idx);
-        } else {
-            result.town                = db.col_town[e.idx];
-            result.block               = db.col_block[e.idx];
-            result.flat_model          = db.col_flat_model[e.idx];
-            result.lease_commence_date = db.col_lease_commence_date[e.idx];
-        }
+    if (tryAnswerFromReusePath(db, x, y, result)) {
         return;
     }
 
-    if (db.use_rle_town && !db.town_run_start.empty()) {
-        std::vector<uint32_t> selected_runs;
-        selected_runs.reserve(towns.size());
-
-        if (db.use_dict_encoding) {
-            for (const auto& town : towns) {
-                uint16_t tid = 0;
-                if (!db.dict_town.lookup(town, tid)) continue;
-                auto it = db.town_to_runs_encoded.find(tid);
-                if (it == db.town_to_runs_encoded.end()) continue;
-                selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
-            }
-        } else {
-            for (const auto& town : towns) {
-                auto it = db.town_to_runs.find(town);
-                if (it == db.town_to_runs.end()) continue;
-                selected_runs.insert(selected_runs.end(), it->second.begin(), it->second.end());
-            }
-        }
-
-        if (selected_runs.empty()) {
-            db.rows_skipped_by_rle = static_cast<uint64_t>(N);
-            return;
-        }
-
-        std::sort(selected_runs.begin(), selected_runs.end());
-        selected_runs.erase(std::unique(selected_runs.begin(), selected_runs.end()), selected_runs.end());
-
-        uint64_t rows_in_selected_runs = 0;
-        for (const uint32_t run_id : selected_runs) {
-            rows_in_selected_runs += static_cast<uint64_t>(db.town_run_length[run_id]);
-        }
-        db.rows_skipped_by_rle = (rows_in_selected_runs >= N)
-            ? 0
-            : static_cast<uint64_t>(N) - rows_in_selected_runs;
-
-        const uint32_t start_key = monthKey(target_year, start_month);
-        const uint32_t end_key   = monthKey(target_year, end_month);
-
-        for (const uint32_t run_id : selected_runs) {
-            ++db.town_runs_scanned;
-
-            const std::size_t run_start = db.town_run_start[run_id];
-            const std::size_t run_end   = run_start + db.town_run_length[run_id];
-
-            std::size_t scan_l = run_start;
-            std::size_t scan_r = run_end;
-
-            if (db.use_presorted_storage && db.use_month_binary_search) {
-                scan_l = lowerBoundMonthKey(db, run_start, run_end, start_key);
-                scan_r = upperBoundMonthKey(db, scan_l, run_end, end_key);
-            }
-
-            for (std::size_t i = scan_l; i < scan_r; ++i) {
-                ++db.rows_scanned_after_rle;
-
-                if (!(db.use_presorted_storage && db.use_month_binary_search)) {
-                    if (db.col_month_year[i] != target_year) continue;
-                    const uint8_t m = db.col_month_month[i];
-                    if (m < start_month || m > end_month) continue;
-                }
-
-                if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
-
-                if (db.use_int_multiply) {
-                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
-                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i])) {
-                        continue;
-                    }
-                }
-
-                const double ppsm = db.use_precomputed_ppsm
-                    ? db.col_price_per_sqm[i]
-                    : static_cast<double>(db.col_resale_price[i]) /
-                      static_cast<double>(db.col_floor_area[i]);
-
-                if (ppsm < min_ppsm) {
-                    min_ppsm = ppsm;
-                    best_i   = i;
-                    result.local_idx = i;
-                    result.no_result = false;
-                }
-            }
-        }
-
-        if (result.no_result) return;
-
-        if (min_ppsm > 4725.0) {
-            result.no_result = true;
-            return;
-        }
-
-        result.year          = db.col_month_year[best_i];
-        result.month         = db.col_month_month[best_i];
-        result.floor_area    = db.col_floor_area[best_i];
-        result.price_per_sqm = min_ppsm;
-
-        if (db.use_columnar_files) {
-            result.town                = loadStringAt(db.column_dir + "/town.col", best_i);
-            result.block               = loadStringAt(db.column_dir + "/block.col", best_i);
-            result.flat_model          = loadStringAt(db.column_dir + "/flat_model.col", best_i);
-            result.lease_commence_date = loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
-        } else {
-            result.town                = db.col_town[best_i];
-            result.block               = db.col_block[best_i];
-            result.flat_model          = db.col_flat_model[best_i];
-            result.lease_commence_date = db.col_lease_commence_date[best_i];
-        }
+    if (tryAnswerFromRlePath(db, target_year, start_month, end_month, towns, result)) {
         return;
     }
 
-    if (db.use_presorted_storage && db.use_month_binary_search) {
-        const uint32_t start_key = monthKey(target_year, start_month);
-        const uint32_t end_key   = monthKey(target_year, end_month);
-
-        for (const auto& town : towns) {
-            TownPartition part;
-            bool has_part = false;
-
-            //Dict Encoding Optimisation: if dict encoding is on, compare town IDs (int==int) instead of full strings
-            if (db.use_dict_encoding) {
-                uint16_t tid = 0;
-                if (db.dict_town.lookup(town, tid) &&
-                    tid < db.town_partitions_encoded.size() &&
-                    db.town_partitions_encoded[tid].valid) {
-                    part = db.town_partitions_encoded[tid];
-                    has_part = true;
-                }
-            // Standard path
-            } else {
-                auto it = db.town_partitions.find(town);
-                if (it != db.town_partitions.end() && it->second.valid) {
-                    part = it->second;
-                    has_part = true;
-                }
-            }
-
-            if (!has_part) continue;
-
-            const std::size_t lb = lowerBoundMonthKey(db, part.begin, part.end, start_key);
-            const std::size_t ub = upperBoundMonthKey(db, lb, part.end, end_key);
-
-            for (std::size_t i = lb; i < ub; ++i) {
-
-                if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
-
-                // cheap integer check before division.
-                // If price > 4725 * area, PPSM must be > 4725, so skip early.
-                if (db.use_int_multiply) {
-                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
-                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i])) {
-                        continue;
-                    }
-                }
-
-                const double ppsm = db.use_precomputed_ppsm
-                    ? db.col_price_per_sqm[i]
-                    : static_cast<double>(db.col_resale_price[i]) /
-                      static_cast<double>(db.col_floor_area[i]);
-
-                if (ppsm < min_ppsm) {
-                    min_ppsm = ppsm;
-                    best_i   = i;
-                    result.local_idx = i;  
-                    result.no_result = false;
-                }
-            }
-        }
-
-        if (result.no_result) return;
-
-        if (min_ppsm > 4725.0) {
-            result.no_result = true;
-            return;
-        }
-
-        result.year                = db.col_month_year[best_i];
-        result.month               = db.col_month_month[best_i];
-        result.floor_area          = db.col_floor_area[best_i];
-        result.price_per_sqm       = min_ppsm;
-
-        if (db.use_columnar_files && !db.use_town_partitioning) {
-            result.town                = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
-                : loadStringAt(db.column_dir + "/town.col", best_i);
-            result.block               = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/block.col", best_i)
-                : loadStringAt(db.column_dir + "/block.col", best_i);
-            result.flat_model          = db.use_mmap_io
-                ? loadStringAtMmap(db.column_dir + "/flat_model.col", best_i)
-                : loadStringAt(db.column_dir + "/flat_model.col", best_i);
-            result.lease_commence_date = db.use_mmap_io
-                ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", best_i)
-                : loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
-        } else {
-            result.town                = db.col_town[best_i];
-            result.block               = db.col_block[best_i];
-            result.flat_model          = db.col_flat_model[best_i];
-            result.lease_commence_date = db.col_lease_commence_date[best_i];
-        }
+    if (tryAnswerFromPresortedBsearchPath(db, target_year, start_month, end_month, towns, result)) {
         return;
     }
 
-
-    // Dict Encoding setup: pre-resolve town IDs once (outside the loop)
-    std::vector<uint16_t> town_ids;
-    if (db.use_dict_encoding && !use_bitmap_path && !db.use_town_partitioning) {
-        town_ids.reserve(towns.size());
-        for (const auto& t : towns) {
-            uint16_t id;
-            if (db.dict_town.lookup(t, id)) {
-                town_ids.push_back(id);
-            }
-        }
-        if (town_ids.empty()) return;
-    }
-
-    const std::size_t num_chunks = db.use_zone_maps
-        ? db.zm_floor_area.numChunks()
-        : 1;
-
-    const uint32_t target_year_32 = static_cast<uint32_t>(target_year);
-    const uint32_t start_month_32 = static_cast<uint32_t>(start_month);
-    const uint32_t end_month_32   = static_cast<uint32_t>(end_month);
-    const uint32_t y_threshold    = static_cast<uint32_t>(y);
-
-    // Late Mat setup: late materialisation survivor list 
-    std::vector<size_t> survivors;
-    if (db.use_late_materialise) {
-        survivors.reserve(N / 20);
-    }
-
-    for (std::size_t chunk = 0; chunk < num_chunks; ++chunk) {
-
-        if (db.use_zone_maps) {
-            // year: if no row in this chunk has the target year, skip
-            if (!db.zm_month_year.chunkMayContainEQ(chunk, target_year_32))
-                continue;
-            // month: if chunk's month range has no overlap with [start, end], skip
-            if (db.zm_month_month.chunks[chunk].max_val < start_month_32 ||
-                db.zm_month_month.chunks[chunk].min_val > end_month_32)
-                continue;
-            // area: if max area in chunk < y, no row can pass area >= y
-            if (!db.zm_floor_area.chunkMayContainGEQ(chunk, y_threshold))
-                continue;
-        }
-
-        // row bounds for this chunk 
-        const std::size_t row_start = db.use_zone_maps ? chunk * ZONE_CHUNK_SIZE : 0;
-        const std::size_t row_end   = db.use_zone_maps
-            ? std::min(row_start + ZONE_CHUNK_SIZE, N)
-            : N;
-
-        for (std::size_t i = row_start; i < row_end; ++i) {
-
-
-            if (use_bitmap_path) {
-                ++db.town_bitmap_evaluations;
-                if (!(*town_mask_ptr)[i]) {
-                    ++db.rows_eliminated_by_bitmap;
-                    continue;
-                }
-            }
-
-            if (db.use_predicate_reorder) {
-                // Predicate Reordering ON: Town FIRST (eliminates ~80% of rows)
-                if (!use_bitmap_path && !db.use_town_partitioning) {
-                    if (db.use_dict_encoding) {
-                        bool match = false;
-                        const uint16_t row_id = db.col_town_encoded[i];
-                        for (const auto& tid : town_ids) {
-                            if (row_id == tid) { match = true; break; }
-                        }
-                        if (!match) continue;
-                    } else {
-                        bool match = false;
-                        for (const auto& t : towns) {
-                            if (db.col_town[i] == t) { match = true; break; }
-                        }
-                        if (!match) continue;
-                    }
-                }
-
-                // then year and month
-                if (db.col_month_year[i] != target_year) continue;
-                const uint8_t m = db.col_month_month[i];
-                if (m < start_month || m > end_month) continue;
-
-            } else {
-                // Predicate Reordering OFF: baseline order: Year → Month → Town 
-                if (db.col_month_year[i] != target_year) continue;
-
-                const uint8_t m = db.col_month_month[i];
-                if (m < start_month || m > end_month) continue;
-
-                // town match 
-                // skip when town_partitioning is on: data is pre-filtered
-                if (!use_bitmap_path && !db.use_town_partitioning) {
-                    if (db.use_dict_encoding) {
-                        bool match = false;
-                        const uint16_t row_id = db.col_town_encoded[i];
-                        for (const auto& tid : town_ids) {
-                            if (row_id == tid) { match = true; break; }
-                        }
-                        if (!match) continue;
-                    } else {
-                        bool match = false;
-                        for (const auto& t : towns) {
-                            if (db.col_town[i] == t) { match = true; break; }
-                        }
-                        if (!match) continue;
-                    }
-                }
-            }
-
-            if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
-
-            // Late Materialisation: defer price access 
-            if (db.use_late_materialise) {
-                survivors.push_back(i);
-            } else {
-                // Integer Multiplication Trick 
-                if (db.use_int_multiply) {
-                    if (static_cast<uint64_t>(db.col_resale_price[i]) >
-                        4725ULL * static_cast<uint64_t>(db.col_floor_area[i]))
-                        continue;
-                }
-
-                // Pre-computed PPSM vs. on-the-fly division 
-                const double ppsm = db.use_precomputed_ppsm
-                    ? db.col_price_per_sqm[i]
-                    : static_cast<double>(db.col_resale_price[i]) /
-                      static_cast<double>(db.col_floor_area[i]);
-
-                if (ppsm < min_ppsm) {
-                    min_ppsm = ppsm;
-                    best_i   = i;
-                    result.local_idx = i; 
-                    result.no_result = false;
-                }
-            }
-        } // end inner loop (rows)
-    } // end outer loop (chunks)
-
-    if (db.use_late_materialise) {
-        for (const size_t idx : survivors) {
-            // integer gate on survivors
-            if (db.use_int_multiply) {
-                if (static_cast<uint64_t>(db.col_resale_price[idx]) >
-                    4725ULL * static_cast<uint64_t>(db.col_floor_area[idx]))
-                    continue;
-            }
-
-            // precomputed vs on-the-fly
-            const double ppsm = db.use_precomputed_ppsm
-                ? db.col_price_per_sqm[idx]
-                : static_cast<double>(db.col_resale_price[idx]) /
-                  static_cast<double>(db.col_floor_area[idx]);
-
-            if (ppsm < min_ppsm) {
-                min_ppsm = ppsm;
-                best_i   = idx;
-                result.local_idx = idx; 
-                result.no_result = false;
-            }
-        }
-    }
-
-    if (result.no_result) return;
-    if (min_ppsm > 4725.0) {
-        result.no_result = true;
-        return;
-    }
-
-    result.year       = db.col_month_year[best_i];
-    result.month      = db.col_month_month[best_i];
-    result.floor_area = db.col_floor_area[best_i];
-    result.price_per_sqm = min_ppsm;
-
-    if (db.use_columnar_files && !db.use_town_partitioning) {
-        result.town                = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/town.col", best_i)
-            : loadStringAt(db.column_dir + "/town.col", best_i);
-        result.block               = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/block.col", best_i)
-            : loadStringAt(db.column_dir + "/block.col", best_i);
-        result.flat_model          = db.use_mmap_io
-            ? loadStringAtMmap(db.column_dir + "/flat_model.col", best_i)
-            : loadStringAt(db.column_dir + "/flat_model.col", best_i);
-        result.lease_commence_date = db.use_mmap_io
-            ? loadUint16AtMmap(db.column_dir + "/lease_commence_date.col", best_i)
-            : loadUint16At(db.column_dir + "/lease_commence_date.col", best_i);
-    } else {
-        result.town                = db.col_town[best_i];
-        result.block               = db.col_block[best_i];
-        result.flat_model          = db.col_flat_model[best_i];
-        result.lease_commence_date = db.col_lease_commence_date[best_i];
-    }
+    runUnifiedScanPath(db,
+                       y,
+                       target_year,
+                       start_month,
+                       end_month,
+                       towns,
+                       use_bitmap_path,
+                       town_mask_ptr,
+                       result);
 }
 
 
