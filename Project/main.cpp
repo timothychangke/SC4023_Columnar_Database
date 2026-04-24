@@ -238,8 +238,7 @@ int main(int argc, char* argv[]) {
         town_bitmap_mask_ptr = &town_bitmap_mask;
     }
 
-    // if opted for optimisation 2 (reuse)
-    if (!db.use_dict_encoding && db.use_reuse) {
+    if (db.use_reuse) {
         std::cout << "Building intermediate cumulative table for reuse...\n";
         db.cum_table = buildCumulativeTable(db, target_year, start_month, towns);
         std::cout << "Cumulative table built. Running queries using IR reuse...\n";
