@@ -22,7 +22,6 @@ Our column-oriented in-memory database engine written in C++17 for querying Sing
 - [Optimisation Flags](#optimisation-flags)
 - [Recommended Configurations](#recommended-configurations)
 - [Evaluation Suite](#evaluation-suite)
-- [Unit Tests](#unit-tests)
 - [Query Parameter Derivation](#query-parameter-derivation)
 - [Output Format](#output-format)
 - [Error Handling](#error-handling)
@@ -43,7 +42,7 @@ Query parameters (target year, start month, and towns) are derived from a matric
 
 ```
 Project/
-├── Makefile                        # Build targets: make, make run, make test, make eval
+├── Makefile                        # Build targets: make, make run, make eval
 ├── main.cpp                        # Entry point — CLI parsing, orchestration
 ├── include/
 │   ├── column_store.h              # ColumnStore struct, DictionaryEncoder, zone maps, RLE metadata
@@ -59,8 +58,6 @@ Project/
 │   └── column_file_io.cpp          # Column file read/write, mmap, chunked I/O, partitioned files
 ├── eval/
 │   └── eval_suite.cpp              # Benchmarking harness — 50+ configs, correctness verification
-├── tests/
-│   └── test_suite.cpp              # Unit tests for each optimisation
 ├── data/
 │   └── columns*/                   # Generated binary column files (created by --write-columns)
 └── results/
@@ -116,9 +113,6 @@ make
 
 # Build and run with our matric number (U2220136J)
 make run
-
-# Build and run unit tests
-make test
 
 # Build and run the full evaluation suite (50+ configs, 5 iterations each)
 make eval

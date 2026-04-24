@@ -1,12 +1,15 @@
 
 
 #include "column_store.h"
-#include <sys/mman.h>
-#include <unistd.h>
 
 #include <algorithm>
 
 #include <iostream>
+
+#ifndef _WIN32
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 void ColumnStore::buildTownRLE() {
     town_run_value.clear();
@@ -158,6 +161,7 @@ void ColumnStore::clear() {
     zm_month_month.chunks.clear();
     
     // unmap any mmap regions
+#ifndef _WIN32
     for (auto& mr : mmap_regions) {
         if (mr.addr && mr.addr != MAP_FAILED) {
             ::munmap(mr.addr, mr.length);
@@ -166,6 +170,7 @@ void ColumnStore::clear() {
             ::close(mr.fd);
         }
     }
+#endif
     mmap_regions.clear();
 
     column_dir = "data/columns/";
