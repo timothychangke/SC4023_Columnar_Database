@@ -19,11 +19,6 @@ $(TARGET): $(OBJS)
 run: $(TARGET)
 	./$(TARGET) U2220136J
 
-test:
-	$(CXX) $(CXXFLAGS) eval/eval_suite.cpp src/column_store.cpp src/csv_parser.cpp src/query_engine.cpp src/output_writer.cpp src/column_file_io.cpp -o test_runner
-	@echo "Test build successful: test_runner"
-	./test_runner ../data/ResalePricesSingapore.csv U2220136J 5
-
 eval:
 	$(CXX) $(CXXFLAGS) eval/eval_suite.cpp src/column_store.cpp src/csv_parser.cpp src/query_engine.cpp src/output_writer.cpp src/column_file_io.cpp -o eval_runner
 	@echo "Eval build successful: eval_runner"
