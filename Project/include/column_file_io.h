@@ -26,7 +26,7 @@ std::size_t loadColumnFilesChunk(const std::string& dir,
 
 void loadColumnFilesMmap(const std::string& dir, ColumnStore& db);
 
-// mmap-backed lazy materialisation — avoids per-call ifstream open.
+// mmap-backed lazy materialisation: avoids per-call ifstream open.
 std::string loadStringAtMmap(const std::string& filepath, std::size_t idx);
 uint16_t    loadUint16AtMmap(const std::string& filepath, std::size_t idx);
 

@@ -70,7 +70,7 @@ static void writeMeta(const ColumnStore& db, const std::string& filepath) {
     if (db.use_precomputed_ppsm) flags |= 0x02;
     f.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
 
-    // always write all four dictionaries — if dict_encoding is off,
+    // always write all four dictionaries: if dict_encoding is off,
     // they'll just have 0 entries, which is fine.
     writeDictionary(f, db.dict_town);
     writeDictionary(f, db.dict_flat_type);
@@ -454,7 +454,7 @@ std::size_t computeIOChunkRows(std::size_t memory_budget_bytes,
         bytes_per_row += sizeof(uint16_t);
     } else {
         // Conservative estimate so the function still returns something
-        // sensible in the (unsupported) non-dict path — caller should refuse.
+        // sensible in the (unsupported) non-dict path: caller should refuse.
         bytes_per_row += 24;  // SSO-aware std::string cost for HDB town names
     }
 
@@ -801,12 +801,12 @@ uint16_t loadUint16AtMmap(const std::string& filepath, std::size_t idx) {
 
 void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_dir) {
     if (db.town_partitions.empty()) {
-        throw std::runtime_error("town_partitions is empty — requires presorted storage");
+        throw std::runtime_error("town_partitions is empty: requires presorted storage");
     }
 
     std::filesystem::create_directories(base_dir);
 
-    // Helper lambdas — same format as writeColumnFiles but for a row range
+    // Helper lambdas: same format as writeColumnFiles but for a row range
     auto writeNumericRange = [](const auto& vec, std::size_t begin, std::size_t end,
                                 const std::string& filepath) {
         std::ofstream f(filepath, std::ios::binary);
@@ -855,7 +855,7 @@ void writeColumnFilesPartitioned(const ColumnStore& db, const std::string& base_
             if (db.use_dict_encoding)    flags |= 0x01;
             if (db.use_precomputed_ppsm) flags |= 0x02;
             f.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
-            // Write dictionaries (same as global — needed for lazy materialisation)
+            // Write dictionaries (same as global: needed for lazy materialisation)
             writeDictionary(f, db.dict_town);
             writeDictionary(f, db.dict_flat_type);
             writeDictionary(f, db.dict_flat_model);

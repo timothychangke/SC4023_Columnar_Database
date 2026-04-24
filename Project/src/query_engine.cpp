@@ -529,14 +529,14 @@ void runQuery(const ColumnStore&              db,
                 if (m < start_month || m > end_month) continue;
 
             } else {
-                // Predicate Reordering OFF: baseline order — Year → Month → Town 
+                // Predicate Reordering OFF: baseline order: Year → Month → Town 
                 if (db.col_month_year[i] != target_year) continue;
 
                 const uint8_t m = db.col_month_month[i];
                 if (m < start_month || m > end_month) continue;
 
                 // town match 
-                // skip when town_partitioning is on — data is pre-filtered
+                // skip when town_partitioning is on: data is pre-filtered
                 if (!use_bitmap_path && !db.use_town_partitioning) {
                     if (db.use_dict_encoding) {
                         bool match = false;
@@ -557,7 +557,7 @@ void runQuery(const ColumnStore&              db,
 
             if (db.col_floor_area[i] < static_cast<uint16_t>(y)) continue;
 
-            // Late Materialisation — defer price access 
+            // Late Materialisation: defer price access 
             if (db.use_late_materialise) {
                 survivors.push_back(i);
             } else {
@@ -672,7 +672,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
         // filter 1: year match
         if (db.col_month_year[i] != target_year) continue;
 
-        // filter 2: month in range — compute offset relative to start_month
+        // filter 2: month in range: compute offset relative to start_month
         const uint8_t month = db.col_month_month[i];
         if (month < start_month) continue;
         int offset = static_cast<int>(month) - static_cast<int>(start_month) + 1;
@@ -690,7 +690,7 @@ std::vector<std::vector<MinEntry>> buildCumulativeTable(
             if (town_set.find(db.col_town[i]) == town_set.end()) continue;
         }
 
-        // filter 4: floor area — clamp to bucket range
+        // filter 4: floor area: clamp to bucket range
         const unsigned area = db.col_floor_area[i];
         if (area < 80) continue;
         const unsigned bucket = (area > 150) ? 150u : area;
@@ -783,7 +783,7 @@ void runAllQueriesChunked(const ColumnStore&              base_db,
         part.column_dir            = base_db.column_dir;
 
         // Dictionaries must be shared so encoded town IDs resolve correctly
-        // across chunks. Copy by value — cheap (~26 towns, ~20 flat models).
+        // across chunks. Copy by value: cheap (~26 towns, ~20 flat models).
         part.dict_town        = base_db.dict_town;
         part.dict_flat_type   = base_db.dict_flat_type;
         part.dict_flat_model  = base_db.dict_flat_model;

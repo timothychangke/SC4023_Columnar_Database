@@ -297,13 +297,13 @@ static void runQueryInstrumented(
         std::min(static_cast<int>(start_month) + x - 1, 12));
 
     // simulate the scan to count predicates
-    // (this is a counting pass only — the real work was already done above)
+    // (this is a counting pass only: the real work was already done above)
     uint64_t local_rows = 0;
     uint64_t local_town_cmp = 0;
     uint64_t local_passed = 0;
 
     // when town_partitioning is on, the loaded data is already
-    // pre-filtered — no town comparisons happen in the scan path.
+    // pre-filtered: no town comparisons happen in the scan path.
     const bool e1_skip_town = db.use_town_partitioning;
 
     // pre-resolve town IDs if dict encoding is on
@@ -649,10 +649,10 @@ static BenchmarkResult runBenchmark(
 
     if (config.mmap_io) {
         if (!config.columnar_files) {
-            std::cout << "  WARNING: mmap_io requires columnar_files — disabling D2.\n";
+            std::cout << "  WARNING: mmap_io requires columnar_files: disabling D2.\n";
             db.use_mmap_io = false;
         } else if (config.chunked_io) {
-            std::cout << "  WARNING: mmap_io conflicts with chunked_io — disabling D2.\n";
+            std::cout << "  WARNING: mmap_io conflicts with chunked_io: disabling D2.\n";
             db.use_mmap_io = false;
         }
     }
@@ -706,7 +706,7 @@ static BenchmarkResult runBenchmark(
             // batch runner. Pre-sizes `results` to exactly 568 entries
             // in slot order (x-1)*71 + (y-80).
             runAllQueriesChunked(db, target_year, start_month, towns, results);
-            // perf counters aren't populated by the batch runner — skip them.
+            // perf counters aren't populated by the batch runner: skip them.
             for (const auto& r : results) {
                 if (!r.no_result) ++perf::queries_valid;
             }
