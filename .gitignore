@@ -1,4 +1,3 @@
-# Compiled objects and executables
 *.o
 *.a
 *.so
@@ -10,13 +9,11 @@ eval_runner
 eval_suit
 eval_suite
 
-# Build directories
 build/
 dist/
 cmake_build/
 .build/
 
-# IDE and editor files
 .vscode/
 .idea/
 *.swp
@@ -28,24 +25,20 @@ cmake_build/
 *.cbp
 .clion.source.header.filter
 
-# CMake
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile.user
 compile_commands.json
 
-# Dependencies (if you use package managers)
 vcpkg_installed/
 conan/
 
-# Output files
 ScanResult_*.csv
 *.bin
 *.zone
 *.dict
 
-# Data directories
 data/columns_a2/
 data/columns_dict_a2/
 data/columns_dict_ppsm_a2/
@@ -53,30 +46,24 @@ data/columns_e1_dict_a2/
 data/columns_e1_dict_ppsm_a2/
 data/columns_ppsm_a2/
 
-# Temporary files
 *.tmp
 *.log
 *.out
 
-# OS-specific
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Python cache (if you have any Python scripts)
 __pycache__/
 *.pyc
 *.pyo
 
-# Doxygen documentation
 doxygen/
 html/
 latex/
 
-# Eval results
 /Project/results/*
 
-# LaTeX report files
 report/*.aux
 report/*.fdb_latexmk
 report/*.fls
