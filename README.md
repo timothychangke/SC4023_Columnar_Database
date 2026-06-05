@@ -6,8 +6,8 @@ Our column-oriented in-memory database engine written in C++17 for querying Sing
 
 | Name          | Matric No. |
 | ------------- | ---------- |
-| Timothy Chang | U2220136J  |
-| Neo Zhi Xuan  | U2222293E  |
+| Timothy Chang | UXXXXXXXJ  |
+| Neo Zhi Xuan  | UXXXXXXXE  |
 
 ---
 
